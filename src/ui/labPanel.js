@@ -1,136 +1,185 @@
-function rangeRow(parent, label, object, key, min, max, step, onInput, getValue) {
-  const wrap = document.createElement('div');
-  wrap.className = 'row';
-  const lab = document.createElement('label');
-  const name = document.createElement('span');
-  const value = document.createElement('span');
-  value.className = 'value';
-  name.textContent = label;
-  lab.append(name, value);
-  const input = document.createElement('input');
-  input.type = 'range';
-  input.min = String(min);
-  input.max = String(max);
-  input.step = String(step);
-  input.value = String(object[key]);
-  const refresh = () => {
-    object[key] = Number(input.value);
-    value.textContent = Number(input.value).toFixed(step < 0.01 ? 3 : 2);
-    onInput?.(object[key]);
-  };
-  input.addEventListener('input', refresh);
-  refresh();
-  wrap.append(lab, input);
-  parent.append(wrap);
-  return {
-    input,
-    refresh() {
-      if (getValue) {
-        const next = Number(getValue());
-        object[key] = next;
-        input.value = String(next);
-        value.textContent = next.toFixed(step < 0.01 ? 3 : 2);
-      }
-    }
-  };
+// ============================================================
+//  labPanel.js
+//  Panel de control tipo "laboratorio": transporte de audio,
+//  medidores en vivo, presets y sliders agrupados.
+//  No sabe nada del canvas: solo avisa con callbacks.
+// ============================================================
+
+function decimalsOf(step) {
+  const s = String(step);
+  return s.includes('.') ? s.split('.')[1].length : 0;
 }
 
-function checkRow(parent, label, initial, onChange, getValue) {
-  const wrap = document.createElement('div');
-  wrap.className = 'row';
-  const lab = document.createElement('label');
-  const name = document.createElement('span');
-  name.textContent = label;
-  const input = document.createElement('input');
-  input.type = 'checkbox';
-  input.checked = initial;
-  input.addEventListener('change', () => onChange(input.checked));
-  lab.append(name, input);
-  wrap.append(lab);
-  parent.append(wrap);
-  return {
-    input,
-    refresh() { if (getValue) input.checked = Boolean(getValue()); }
-  };
+function el(tag, className, html) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (html !== undefined) node.innerHTML = html;
+  return node;
 }
 
-function button(parent, label, onClick) {
-  const b = document.createElement('button');
-  b.textContent = label;
-  b.addEventListener('click', onClick);
-  parent.append(b);
-  return b;
-}
-
-export function createLabPanel({ params, onReset, onPreset, onModeChange, onPauseChange }) {
-  const refreshers = [];
-  const panel = document.createElement('aside');
-  panel.className = 'panel';
-  panel.innerHTML = `
-    <h1>U3 · Forces Instrument</h1>
-    <p>LAB: aísla fuerzas, predice y prueba. <strong>P</strong> cambia a PERFORMANCE.</p>
+export function createLabPanel({
+  mount,
+  params,
+  definitions,
+  presets = {},
+  onParam,
+  onPreset,
+  onReset,
+  onRegenerate,
+  onTogglePlay,
+  onNextPattern,
+  onFullscreen,
+  title = 'LAB // MATRIX CITY',
+}) {
+  const root = el('aside', 'lab-panel');
+  root.innerHTML = `
+    <header class="lab-head">
+      <span class="lab-title">${title}</span>
+      <button type="button" class="lab-icon" data-act="collapse" title="Plegar panel">_</button>
+    </header>
+    <div class="lab-body">
+      <section class="lab-transport">
+        <button type="button" class="lab-btn lab-btn--primary" data-act="play">▶ PLAY</button>
+        <button type="button" class="lab-btn" data-act="regen" title="Regenerar edificios (R)">⟳ CIUDAD</button>
+        <button type="button" class="lab-btn" data-act="pattern" title="Siguiente patrón láser (P)">✦ LÁSER</button>
+        <button type="button" class="lab-btn" data-act="fs" title="Pantalla completa (F)">⛶</button>
+      </section>
+      <section class="lab-meters">
+        <div class="lab-meter"><span>BAJO</span><i><b data-meter="bass"></b></i></div>
+        <div class="lab-meter"><span>MEDIO</span><i><b data-meter="mid"></b></i></div>
+        <div class="lab-meter"><span>AGUDO</span><i><b data-meter="treble"></b></i></div>
+        <div class="lab-beat"><span class="lab-led" data-led></span><span data-bpm>-- BPM</span></div>
+      </section>
+      <section class="lab-presets"></section>
+      <div class="lab-groups"></div>
+      <footer class="lab-foot">
+        <button type="button" class="lab-btn lab-btn--ghost" data-act="reset">RESTABLECER</button>
+        <p>Espacio ▶/❚❚ · H panel · F pantalla completa · R ciudad · P láser</p>
+      </footer>
+    </div>
   `;
 
-  const sim = document.createElement('div');
-  sim.className = 'group';
-  sim.innerHTML = '<h2>Simulación</h2>';
-  panel.append(sim);
-
-  const state = {
-    timeScale: params.timeScale.value,
-    maxSpeed: params.maxSpeed.value,
-    particleSize: params.particleSize.value,
-    radialStrength: params.radialStrength.value,
-    vortexStrength: params.vortexStrength.value,
-    dragCoefficient: params.dragCoefficient.value,
-    windX: params.wind.value.x,
-    windY: params.wind.value.y
+  const groupsEl = root.querySelector('.lab-groups');
+  const presetsEl = root.querySelector('.lab-presets');
+  const playBtn = root.querySelector('[data-act="play"]');
+  const meters = {
+    bass: root.querySelector('[data-meter="bass"]'),
+    mid: root.querySelector('[data-meter="mid"]'),
+    treble: root.querySelector('[data-meter="treble"]'),
   };
+  const led = root.querySelector('[data-led]');
+  const bpmEl = root.querySelector('[data-bpm]');
 
-  refreshers.push(rangeRow(sim, 'timeScale', state, 'timeScale', 0, 2, 0.01, (v) => params.timeScale.value = v, () => params.timeScale.value));
-  refreshers.push(rangeRow(sim, 'maxSpeed', state, 'maxSpeed', 0.2, 12, 0.1, (v) => params.maxSpeed.value = v, () => params.maxSpeed.value));
-  refreshers.push(rangeRow(sim, 'particleSize', state, 'particleSize', 0.005, 0.1, 0.001, (v) => params.particleSize.value = v, () => params.particleSize.value));
+  // --- presets ---
+  for (const name of Object.keys(presets)) {
+    const b = el('button', 'lab-chip');
+    b.type = 'button';
+    b.textContent = name;
+    b.addEventListener('click', () => {
+      if (onPreset) onPreset(name, presets[name]);
+      sync();
+    });
+    presetsEl.appendChild(b);
+  }
 
-  const force = document.createElement('div');
-  force.className = 'group';
-  force.innerHTML = '<h2>Fuerzas</h2>';
-  panel.append(force);
+  // --- controles agrupados ---
+  const controls = []; // { def, input, output }
+  const groups = new Map();
+  for (const def of definitions) {
+    if (!groups.has(def.group)) {
+      const details = el('details', 'lab-group');
+      details.open = def.group === 'Audio' || def.group === 'Láseres';
+      details.appendChild(el('summary', '', def.group));
+      groupsEl.appendChild(details);
+      groups.set(def.group, details);
+    }
+    const holder = groups.get(def.group);
+    const row = el('label', 'lab-row');
+    const label = el('span', 'lab-label', def.label);
+    row.appendChild(label);
 
-  refreshers.push(checkRow(force, 'Radial', params.radialEnabled.value > 0, (v) => params.radialEnabled.value = v ? 1 : 0, () => params.radialEnabled.value > 0));
-  refreshers.push(rangeRow(force, 'radialStrength', state, 'radialStrength', -8, 8, 0.05, (v) => params.radialStrength.value = v, () => params.radialStrength.value));
-  refreshers.push(checkRow(force, 'Vórtice', params.vortexEnabled.value > 0, (v) => params.vortexEnabled.value = v ? 1 : 0, () => params.vortexEnabled.value > 0));
-  refreshers.push(rangeRow(force, 'vortexStrength', state, 'vortexStrength', -8, 8, 0.05, (v) => params.vortexStrength.value = v, () => params.vortexStrength.value));
-  refreshers.push(checkRow(force, 'Drag', params.dragEnabled.value > 0, (v) => params.dragEnabled.value = v ? 1 : 0, () => params.dragEnabled.value > 0));
-  refreshers.push(rangeRow(force, 'dragCoefficient', state, 'dragCoefficient', 0, 1, 0.01, (v) => params.dragCoefficient.value = v, () => params.dragCoefficient.value));
-  refreshers.push(checkRow(force, 'Viento', params.windEnabled.value > 0, (v) => params.windEnabled.value = v ? 1 : 0, () => params.windEnabled.value > 0));
-  refreshers.push(rangeRow(force, 'wind.x', state, 'windX', -4, 4, 0.05, (v) => params.wind.value.x = v, () => params.wind.value.x));
-  refreshers.push(rangeRow(force, 'wind.y', state, 'windY', -4, 4, 0.05, (v) => params.wind.value.y = v, () => params.wind.value.y));
+    if (def.type === 'toggle') {
+      row.classList.add('lab-row--toggle');
+      const input = el('input');
+      input.type = 'checkbox';
+      input.checked = !!params[def.key];
+      input.addEventListener('change', () => {
+        if (onParam) onParam(def.key, input.checked);
+      });
+      row.appendChild(input);
+      row.appendChild(el('span', 'lab-switch'));
+      controls.push({ def, input, output: null });
+    } else {
+      const output = el('output', 'lab-value');
+      const input = el('input');
+      input.type = 'range';
+      input.min = def.min;
+      input.max = def.max;
+      input.step = def.step;
+      input.value = params[def.key];
+      const dec = decimalsOf(def.step);
+      const fmt = (v) => Number(v).toFixed(dec);
+      output.textContent = fmt(params[def.key]);
+      input.addEventListener('input', () => {
+        const v = Number(input.value);
+        output.textContent = fmt(v);
+        if (onParam) onParam(def.key, v);
+      });
+      row.appendChild(output);
+      row.appendChild(input);
+      controls.push({ def, input, output, fmt });
+    }
+    holder.appendChild(row);
+  }
 
-  const tests = document.createElement('div');
-  tests.className = 'group';
-  tests.innerHTML = '<h2>Pruebas de comportamiento</h2><p>Antes de pulsar una prueba, predice qué debería ocurrir.</p>';
-  panel.append(tests);
-  for (const [id, label] of [
-    ['inertia', '1 · Inercia'],
-    ['wind', '2 · Fuerza constante +X'],
-    ['attract', '3 · Atracción'],
-    ['repel', '4 · Repulsión'],
-    ['vortex', '5 · Vórtice']
-  ]) button(tests, label, () => onPreset(id));
+  // Vuelve a leer los valores de `params` (tras un preset o un reset)
+  function sync() {
+    for (const c of controls) {
+      const v = params[c.def.key];
+      if (c.def.type === 'toggle') c.input.checked = !!v;
+      else {
+        c.input.value = v;
+        c.output.textContent = c.fmt(v);
+      }
+    }
+  }
 
-  const actions = document.createElement('div');
-  actions.className = 'group';
-  actions.innerHTML = '<h2>Acciones</h2>';
-  panel.append(actions);
-  button(actions, 'Reset', onReset);
-  button(actions, 'Pausar / continuar', () => onPauseChange());
-  button(actions, 'LAB / PERFORMANCE', () => onModeChange());
+  // --- botones ---
+  root.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-act]');
+    if (!btn) return;
+    switch (btn.dataset.act) {
+      case 'collapse': root.classList.toggle('is-collapsed'); break;
+      case 'play': if (onTogglePlay) onTogglePlay(); break;
+      case 'regen': if (onRegenerate) onRegenerate(); break;
+      case 'pattern': if (onNextPattern) onNextPattern(); break;
+      case 'fs': if (onFullscreen) onFullscreen(); break;
+      case 'reset':
+        if (onReset) onReset();
+        sync();
+        break;
+      default: break;
+    }
+  });
 
-  document.body.append(panel);
+  mount.appendChild(root);
 
   return {
-    element: panel,
-    setVisible(visible) { panel.classList.toggle('hidden', !visible); },
-    refresh() { for (const item of refreshers) item.refresh(); }
+    element: root,
+    sync,
+    toggleHidden() { root.classList.toggle('is-hidden'); },
+    setPlaying(isPlaying) {
+      playBtn.textContent = isPlaying ? '❚❚ PAUSA' : '▶ PLAY';
+      playBtn.classList.toggle('is-on', isPlaying);
+    },
+    // se llama cada frame con los niveles de audio
+    update(levels) {
+      meters.bass.style.transform = `scaleX(${Math.min(1, levels.bass).toFixed(3)})`;
+      meters.mid.style.transform = `scaleX(${Math.min(1, levels.mid).toFixed(3)})`;
+      meters.treble.style.transform = `scaleX(${Math.min(1, levels.treble).toFixed(3)})`;
+      led.style.opacity = (0.15 + levels.beat * 0.85).toFixed(2);
+      bpmEl.textContent = levels.bpm ? `${Math.round(levels.bpm)} BPM` : '-- BPM';
+    },
+    destroy() { root.remove(); },
   };
 }

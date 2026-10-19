@@ -3,11 +3,39 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="color-scheme" content="dark" />
-    <title>U3 · Forces Instrument</title>
+    <meta name="theme-color" content="#000a04" />
+    <title>MATRIX CITY // sci-fi</title>
   </head>
   <body>
-    <div id="app"></div>
+    <div id="app">
+      <canvas id="scene" aria-label="Ciudad cifrada que reacciona a la música"></canvas>
+
+      <!-- HUD retro (esquina superior izquierda) -->
+      <div class="hud" aria-hidden="true">
+        <div class="hud-title">MATRIX//CITY</div>
+        <div class="hud-line"><span class="hud-key">TRACK</span> <span id="track-name">--</span></div>
+        <div class="hud-line"><span class="hud-key">STATUS</span> <span id="hud-status">○ SIN SEÑAL</span></div>
+        <div class="hud-line"><span class="hud-key">TEMPO</span> <span id="hud-bpm">-- BPM</span></div>
+        <div class="hud-line"><span class="hud-key">TIME</span> <span id="hud-time">00:00</span></div>
+      </div>
+
+      <!-- Panel de control (lo construye src/ui/labPanel.js) -->
+      <div id="panel-root"></div>
+
+      <!-- Pantalla de inicio: necesaria para que el navegador permita el audio -->
+      <div id="start-overlay" class="overlay">
+        <div class="overlay-card">
+          <p class="overlay-kicker">SYSTEM // BOOT</p>
+          <h1 class="glitch" data-text="MATRIX CITY">MATRIX CITY</h1>
+          <p class="overlay-sub">Ciudad cifrada · láseres · señal en vivo</p>
+          <button id="start-btn" class="big-btn" type="button">► INICIAR TRANSMISIÓN</button>
+          <button id="demo-btn" class="link-btn" type="button">entrar sin audio</button>
+          <p id="overlay-msg" class="overlay-msg" hidden></p>
+        </div>
+      </div>
+    </div>
+
+    <noscript>Este visual necesita JavaScript activado.</noscript>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>
