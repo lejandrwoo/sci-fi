@@ -1,185 +1,104 @@
-// ============================================================
-//  labPanel.js
-//  Panel de control tipo "laboratorio": transporte de audio,
-//  medidores en vivo, presets y sliders agrupados.
-//  No sabe nada del canvas: solo avisa con callbacks.
-// ============================================================
+// =====================================================================
+//  labpanel.js — Enlace con el HTML: slider de audio, primer gesto del
+//  usuario (para arrancar el audio) y modo presentación (tecla P).
+// =====================================================================
+import { PARAMS, state } from '../simulation/parameters.js';
 
-function decimalsOf(step) {
-  const s = String(step);
-  return s.includes('.') ? s.split('.')[1].length : 0;
-}
+export function createLabPanel({ canvas, audio, onStart }) {
+  const seekWrap = document.getElementById('seekWrap');
+  const seek = document.getElementById('seek');
+  let dragging = false;
 
-function el(tag, className, html) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (html !== undefined) node.innerHTML = html;
-  return node;
-}
+  // ---------- Pista de inicio (se elimina con ui.showStartHint = false) ----------
+  let hint = null;
+  if (PARAMS.ui.showStartHint) {
+    hint = document.createElement('div');
+    hint.id = 'hint';
+    hint.textContent = PARAMS.ui.hintText;
+    document.body.appendChild(hint);
+  }
 
-export function createLabPanel({
-  mount,
-  params,
-  definitions,
-  presets = {},
-  onParam,
-  onPreset,
-  onReset,
-  onRegenerate,
-  onTogglePlay,
-  onNextPattern,
-  onFullscreen,
-  title = 'LAB // MATRIX CITY',
-}) {
-  const root = el('aside', 'lab-panel');
-  root.innerHTML = `
-    <header class="lab-head">
-      <span class="lab-title">${title}</span>
-      <button type="button" class="lab-icon" data-act="collapse" title="Plegar panel">_</button>
-    </header>
-    <div class="lab-body">
-      <section class="lab-transport">
-        <button type="button" class="lab-btn lab-btn--primary" data-act="play">▶ PLAY</button>
-        <button type="button" class="lab-btn" data-act="regen" title="Regenerar edificios (R)">⟳ CIUDAD</button>
-        <button type="button" class="lab-btn" data-act="pattern" title="Siguiente patrón láser (P)">✦ LÁSER</button>
-        <button type="button" class="lab-btn" data-act="fs" title="Pantalla completa (F)">⛶</button>
-      </section>
-      <section class="lab-meters">
-        <div class="lab-meter"><span>BAJO</span><i><b data-meter="bass"></b></i></div>
-        <div class="lab-meter"><span>MEDIO</span><i><b data-meter="mid"></b></i></div>
-        <div class="lab-meter"><span>AGUDO</span><i><b data-meter="treble"></b></i></div>
-        <div class="lab-beat"><span class="lab-led" data-led></span><span data-bpm>-- BPM</span></div>
-      </section>
-      <section class="lab-presets"></section>
-      <div class="lab-groups"></div>
-      <footer class="lab-foot">
-        <button type="button" class="lab-btn lab-btn--ghost" data-act="reset">RESTABLECER</button>
-        <p>Espacio ▶/❚❚ · H panel · F pantalla completa · R ciudad · P láser</p>
-      </footer>
-    </div>
-  `;
-
-  const groupsEl = root.querySelector('.lab-groups');
-  const presetsEl = root.querySelector('.lab-presets');
-  const playBtn = root.querySelector('[data-act="play"]');
-  const meters = {
-    bass: root.querySelector('[data-meter="bass"]'),
-    mid: root.querySelector('[data-meter="mid"]'),
-    treble: root.querySelector('[data-meter="treble"]'),
+  // ---------- Primer gesto: los navegadores bloquean el audio hasta que hay uno ----------
+  let startedOnce = false;
+  const firstGesture = () => {
+    if (startedOnce) return;
+    startedOnce = true;
+    if (hint) {
+      hint.remove();
+      hint = null;
+    }
+    window.removeEventListener('pointerdown', firstGesture, true);
+    window.removeEventListener('keydown', firstGesture, true);
+    window.removeEventListener('touchend', firstGesture, true);
+    if (onStart) onStart();
   };
-  const led = root.querySelector('[data-led]');
-  const bpmEl = root.querySelector('[data-bpm]');
+  window.addEventListener('pointerdown', firstGesture, true);
+  window.addEventListener('keydown', firstGesture, true);
+  window.addEventListener('touchend', firstGesture, true);
 
-  // --- presets ---
-  for (const name of Object.keys(presets)) {
-    const b = el('button', 'lab-chip');
-    b.type = 'button';
-    b.textContent = name;
-    b.addEventListener('click', () => {
-      if (onPreset) onPreset(name, presets[name]);
-      sync();
-    });
-    presetsEl.appendChild(b);
-  }
+  // ---------- Slider ----------
+  seek.addEventListener('pointerdown', () => { dragging = true; });
+  seek.addEventListener('change', () => { dragging = false; });
+  window.addEventListener('pointerup', () => { dragging = false; });
+  window.addEventListener('pointercancel', () => { dragging = false; });
 
-  // --- controles agrupados ---
-  const controls = []; // { def, input, output }
-  const groups = new Map();
-  for (const def of definitions) {
-    if (!groups.has(def.group)) {
-      const details = el('details', 'lab-group');
-      details.open = def.group === 'Audio' || def.group === 'Láseres';
-      details.appendChild(el('summary', '', def.group));
-      groupsEl.appendChild(details);
-      groups.set(def.group, details);
-    }
-    const holder = groups.get(def.group);
-    const row = el('label', 'lab-row');
-    const label = el('span', 'lab-label', def.label);
-    row.appendChild(label);
-
-    if (def.type === 'toggle') {
-      row.classList.add('lab-row--toggle');
-      const input = el('input');
-      input.type = 'checkbox';
-      input.checked = !!params[def.key];
-      input.addEventListener('change', () => {
-        if (onParam) onParam(def.key, input.checked);
-      });
-      row.appendChild(input);
-      row.appendChild(el('span', 'lab-switch'));
-      controls.push({ def, input, output: null });
-    } else {
-      const output = el('output', 'lab-value');
-      const input = el('input');
-      input.type = 'range';
-      input.min = def.min;
-      input.max = def.max;
-      input.step = def.step;
-      input.value = params[def.key];
-      const dec = decimalsOf(def.step);
-      const fmt = (v) => Number(v).toFixed(dec);
-      output.textContent = fmt(params[def.key]);
-      input.addEventListener('input', () => {
-        const v = Number(input.value);
-        output.textContent = fmt(v);
-        if (onParam) onParam(def.key, v);
-      });
-      row.appendChild(output);
-      row.appendChild(input);
-      controls.push({ def, input, output, fmt });
-    }
-    holder.appendChild(row);
-  }
-
-  // Vuelve a leer los valores de `params` (tras un preset o un reset)
-  function sync() {
-    for (const c of controls) {
-      const v = params[c.def.key];
-      if (c.def.type === 'toggle') c.input.checked = !!v;
-      else {
-        c.input.value = v;
-        c.output.textContent = c.fmt(v);
-      }
-    }
-  }
-
-  // --- botones ---
-  root.addEventListener('click', (e) => {
-    const btn = e.target.closest('[data-act]');
-    if (!btn) return;
-    switch (btn.dataset.act) {
-      case 'collapse': root.classList.toggle('is-collapsed'); break;
-      case 'play': if (onTogglePlay) onTogglePlay(); break;
-      case 'regen': if (onRegenerate) onRegenerate(); break;
-      case 'pattern': if (onNextPattern) onNextPattern(); break;
-      case 'fs': if (onFullscreen) onFullscreen(); break;
-      case 'reset':
-        if (onReset) onReset();
-        sync();
-        break;
-      default: break;
+  seek.addEventListener('input', () => {
+    const d = audio.duration;
+    if (d > 0 && isFinite(d)) {
+      audio.currentTime = (Number(seek.value) / Number(seek.max)) * d;
     }
   });
 
-  mount.appendChild(root);
+  // Llamado en cada frame desde main.js
+  function sync(current, duration) {
+    if (dragging || !(duration > 0) || !isFinite(duration)) return;
+    seek.value = String((current / duration) * Number(seek.max));
+  }
 
-  return {
-    element: root,
-    sync,
-    toggleHidden() { root.classList.toggle('is-hidden'); },
-    setPlaying(isPlaying) {
-      playBtn.textContent = isPlaying ? '❚❚ PAUSA' : '▶ PLAY';
-      playBtn.classList.toggle('is-on', isPlaying);
-    },
-    // se llama cada frame con los niveles de audio
-    update(levels) {
-      meters.bass.style.transform = `scaleX(${Math.min(1, levels.bass).toFixed(3)})`;
-      meters.mid.style.transform = `scaleX(${Math.min(1, levels.mid).toFixed(3)})`;
-      meters.treble.style.transform = `scaleX(${Math.min(1, levels.treble).toFixed(3)})`;
-      led.style.opacity = (0.15 + levels.beat * 0.85).toFixed(2);
-      bpmEl.textContent = levels.bpm ? `${Math.round(levels.bpm)} BPM` : '-- BPM';
-    },
-    destroy() { root.remove(); },
+  // ---------- Modo presentación (tecla P) ----------
+  function applyPresentation(on) {
+    state.presentation = on;
+    seekWrap.classList.toggle('hidden', on);
+    if (hint) hint.classList.toggle('hidden', on);
+    document.body.classList.toggle('no-cursor', on);
+  }
+
+  async function togglePresentation() {
+    const entering = !state.presentation;
+    const root = document.documentElement;
+    try {
+      if (entering) {
+        if (root.requestFullscreen) await root.requestFullscreen();
+        else if (root.webkitRequestFullscreen) root.webkitRequestFullscreen();
+      } else if (document.fullscreenElement || document.webkitFullscreenElement) {
+        if (document.exitFullscreen) await document.exitFullscreen();
+        else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+      }
+    } catch (err) {
+      // Si el navegador no permite pantalla completa (p. ej. iPhone) igual ocultamos la UI
+      console.warn('Fullscreen no disponible:', err);
+    }
+    applyPresentation(entering);
+  }
+
+  window.addEventListener('keydown', (e) => {
+    if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key && e.key.toLowerCase() === 'p') {
+      e.preventDefault();
+      togglePresentation();
+    }
+  });
+
+  // Si el usuario sale con ESC, restauramos mouse y slider
+  const onFsChange = () => {
+    const fs = document.fullscreenElement || document.webkitFullscreenElement;
+    if (!fs && state.presentation) applyPresentation(false);
   };
+  document.addEventListener('fullscreenchange', onFsChange);
+  document.addEventListener('webkitfullscreenchange', onFsChange);
+
+  // En celulares no hay tecla P: doble toque sobre el canvas hace lo mismo
+  canvas.addEventListener('dblclick', togglePresentation);
+
+  return { sync, togglePresentation };
 }

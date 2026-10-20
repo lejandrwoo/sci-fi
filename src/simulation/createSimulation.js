@@ -1,965 +1,1843 @@
-// ============================================================
-//  createSimulation.js
-//  Motor visual "MATRIX CITY" (canvas 2D, JS puro).
-//
-//  Capas (de atrás hacia delante):
-//    cielo → sol retro → lluvia de glifos → piso con grilla →
-//    3 capas de edificios cifrados → láseres → ecualizador LED →
-//    postproceso (bloom, glitch, viñeta, scanlines)
-//
-//  El audio se analiza en 3 bandas (bajo / medios / agudos) y se
-//  detectan beats; todo el visual reacciona a esos valores.
-// ============================================================
+// =====================================================================
+//  createsimulation.js — Escenas 3D, VideoTexture + chroma key negro (GLSL),
+//  postproceso de glitches y director de efectos aleatorios.
+// =====================================================================
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+import { PARAMS, attachSourceFallback } from './parameters.js';
 
-import { AUDIO_SRC, AUDIO_NAME, config, defaultParams, regenKeys } from './parameters.js';
-
-// ---------- utilidades ----------
-const TAU = Math.PI * 2;
-const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
-const mod = (n, m) => ((n % m) + m) % m;
+// ---------- Utilidades ----------
 const rand = (a, b) => a + Math.random() * (b - a);
-const hsla = (h, s, l, a = 1) => `hsla(${h}, ${s}%, ${l}%, ${a})`;
-// convierte una tasa "por frame a 60fps" en una tasa independiente de dt
-const smoothK = (rate, dt) => 1 - Math.pow(1 - clamp(rate, 0, 0.999), dt * 60);
-const easeOutCubic = (x) => 1 - Math.pow(1 - x, 3);
+const randInt = (a, b) => Math.floor(rand(a, b + 1));
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const lerp = (a, b, t) => a + (b - a) * t;
+const smooth = (t) => { t = clamp(t, 0, 1); return t * t * (3 - 2 * t); };
+const deg = THREE.MathUtils.degToRad;
 
-function mulberry32(seed) {
-  let a = seed | 0;
-  return function () {
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
+const MOBILE =
+  (typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse)').matches) ||
+  Math.min(window.innerWidth, window.innerHeight) < 600;
+const Q = MOBILE ? PARAMS.quality.mobileFactor : 1;
+const N = (n) => Math.max(1, Math.round(n * Q));
 
-const BASE = config.baseHue;
-const GLYPHS = [...config.glyphs];
-const AS = 32; // tamaño de cada glifo en el atlas
+// Pixel ratio compartido por todos los shaders de puntos
+const SHARED = { px: { value: 1 } };
 
-// 3 capas de profundidad para la ciudad (lejos → cerca)
-const LAYERS = [
-  { scale: 0.55, bright: 0.4, speed: 0.35, ground: 0.0, hMul: 0.85, gap: [6, 26] },
-  { scale: 0.8, bright: 0.65, speed: 0.65, ground: 0.09, hMul: 1.0, gap: [10, 40] },
-  { scale: 1.15, bright: 1.0, speed: 1.0, ground: 0.2, hMul: 1.05, gap: [24, 90] },
-];
+const FLOOR_Y = -2.6; // altura del "suelo" bajo los personajes
 
-// colores de los láseres (tonos HSL, alrededor del verde)
-const LASER_HUES = [BASE, BASE + 28, BASE - 30, BASE + 55, BASE - 12, BASE + 14];
-
-// Dibuja todos los glifos en una tira horizontal para reutilizarlos
-// con drawImage (mucho más barato que fillText cada frame).
-function buildAtlas(color) {
+// =====================================================================
+//  Texturas generadas por código
+// =====================================================================
+function makeDotTexture(size = 64) {
   const c = document.createElement('canvas');
-  c.width = GLYPHS.length * AS;
-  c.height = AS;
+  c.width = c.height = size;
   const g = c.getContext('2d');
-  g.fillStyle = color;
-  g.textAlign = 'center';
-  g.textBaseline = 'middle';
-  g.font = `bold ${Math.round(AS * 0.78)}px "MS Gothic","Noto Sans Mono CJK JP","Courier New",monospace`;
-  GLYPHS.forEach((ch, i) => g.fillText(ch, i * AS + AS / 2, AS / 2 + 1));
-  return c;
+  const gr = g.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  gr.addColorStop(0, 'rgba(255,255,255,1)');
+  gr.addColorStop(0.4, 'rgba(255,255,255,0.55)');
+  gr.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = gr;
+  g.fillRect(0, 0, size, size);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
 }
 
-export function createSimulation(canvas, options = {}) {
-  const { onState, onFrame, initialParams } = options;
-  const ctx = canvas.getContext('2d', { alpha: false });
+// Fachada blanca con ventanas finas (edificios de la escena 2)
+function makeWhiteFacadeTexture() {
+  const W = 128, H = 256, cols = 6, rows = 16;
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const g = c.getContext('2d');
+  g.fillStyle = '#ffffff';
+  g.fillRect(0, 0, W, H);
+  const cw = W / cols, ch = H / rows;
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      const r = Math.random();
+      g.fillStyle = r < 0.2 ? '#8e96a3' : '#d3d8e0';
+      g.fillRect(x * cw + cw * 0.22, y * ch + ch * 0.25, cw * 0.56, ch * 0.5);
+    }
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.anisotropy = 4;
+  return t;
+}
 
-  // ---------- parámetros vivos ----------
-  const params = { ...defaultParams };
-  if (initialParams) {
-    for (const k of Object.keys(defaultParams)) {
-      if (k in initialParams && typeof initialParams[k] === typeof defaultParams[k]) {
-        params[k] = initialParams[k];
+// Ventanas de neón (emissiveMap) para la ciudad retro de la escena 3
+function makeNeonWindowsTexture(palette) {
+  const W = 128, H = 256, cols = 4, rows = 8;
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const g = c.getContext('2d');
+  g.fillStyle = '#000';
+  g.fillRect(0, 0, W, H);
+  const cw = W / cols, ch = H / rows;
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      if (Math.random() < 0.42) {
+        g.fillStyle = palette[randInt(0, palette.length - 1)];
+        g.fillRect(x * cw + cw * 0.2, y * ch + ch * 0.22, cw * 0.6, ch * 0.5);
       }
     }
   }
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  return t;
+}
 
-  // ---------- estado ----------
-  let W = 0, H = 0, dpr = 1;
-  let raf = 0, last = 0, time = 0, running = false;
-  let city = [];
-  let rain = [];
-  const rainCell = 14;
-  let sunCanvas = null, sunR = 0;
-  let bloomA = null, bloomB = null, vignette = null, scanPattern = null;
-  let gridZ = 0, wave = 0, pattern = 0, beatCount = 0;
-  let appliedHue = null, regenTimer = 0, resizeTimer = 0;
-  let playing = false, audioError = false;
+function makeDataHudTexture() {
+  const width = 1024;
+  const height = 576;
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
 
-  const atlasGreen = buildAtlas(hsla(BASE, 100, 58, 1));
-  const atlasHead = buildAtlas('#e6fff0');
+  ctx.strokeStyle = 'rgba(145,255,203,0.78)';
+  ctx.fillStyle = 'rgba(145,255,203,0.78)';
+  ctx.lineWidth = 2;
+  ctx.font = 'bold 14px monospace';
 
-  // ---------- audio ----------
-  const audio = new Audio();
-  audio.loop = true;
-  audio.preload = 'auto';
-  audio.src = AUDIO_SRC;
-
-  let actx = null, analyser = null, gainNode = null, freq = null;
-  const emit = (e) => { if (onState) onState(e); };
-
-  audio.addEventListener('play', () => { playing = true; emit({ type: 'play' }); });
-  audio.addEventListener('pause', () => { playing = false; emit({ type: 'pause' }); });
-  audio.addEventListener('canplay', () => { audioError = false; emit({ type: 'ready' }); });
-  audio.addEventListener('error', () => {
-    audioError = true;
-    emit({
-      type: 'error',
-      message: `No se pudo cargar ${AUDIO_NAME}. Revisa que exista en la carpeta public/.`,
-    });
-  });
-
-  function ensureGraph() {
-    if (actx) return;
-    const AC = window.AudioContext || window.webkitAudioContext;
-    actx = new AC();
-    const src = actx.createMediaElementSource(audio);
-    analyser = actx.createAnalyser();
-    analyser.fftSize = config.fftSize;
-    analyser.smoothingTimeConstant = 0.5;
-    gainNode = actx.createGain();
-    gainNode.gain.value = params.volume;
-    // el analizador lee ANTES del volumen: los visuales no se apagan al bajar el volumen
-    src.connect(analyser);
-    src.connect(gainNode);
-    gainNode.connect(actx.destination);
-    freq = new Uint8Array(analyser.frequencyBinCount);
-  }
-
-  async function play() {
-    try {
-      ensureGraph();
-      if (actx.state === 'suspended') await actx.resume();
-      await audio.play();
-      return true;
-    } catch (err) {
-      emit({
-        type: 'error',
-        message: audioError
-          ? `No se pudo cargar ${AUDIO_NAME}. Revisa que exista en la carpeta public/.`
-          : `No se pudo reproducir el audio (${err && err.name ? err.name : 'error'}).`,
-      });
-      return false;
-    }
-  }
-  function pause() { audio.pause(); }
-  async function toggle() { if (playing) { pause(); return false; } return play(); }
-
-  // ---------- análisis ----------
-  const levels = {
-    bass: 0, mid: 0, treble: 0, energy: 0, beat: 0, bpm: 0,
-    playing: false, time: 0, duration: 0, pattern: 0,
-    spectrum: new Float32Array(config.bandsCount),
-  };
-  const spectrum = levels.spectrum;
-  const peak = { bass: 0.2, mid: 0.2, treble: 0.2 };
-  const bassHist = [];
-  const beatTimes = [];
-  let lastBeat = -10;
-
-  function bandLevel(lo, hi) {
-    const binHz = actx.sampleRate / analyser.fftSize;
-    const a = clamp(Math.floor(lo / binHz), 1, freq.length - 2);
-    const b = clamp(Math.ceil(hi / binHz), a, freq.length - 1);
-    let s = 0;
-    for (let i = a; i <= b; i++) s += freq[i];
-    return s / ((b - a + 1) * 255);
-  }
-
-  function analyse(dt, t) {
-    let nb = 0, nm = 0, nt = 0;
-    const n = config.bandsCount;
-    const specTarget = analyse.tmp || (analyse.tmp = new Float32Array(n));
-    specTarget.fill(0);
-
-    if (playing && analyser) {
-      analyser.getByteFrequencyData(freq);
-      const rb = bandLevel(...config.bands.bass);
-      const rm = bandLevel(...config.bands.mid);
-      const rt = bandLevel(...config.bands.treble);
-      // autoganancia: se adapta a lo fuerte que esté la canción
-      peak.bass = Math.max(rb, peak.bass - dt * 0.02, 0.12);
-      peak.mid = Math.max(rm, peak.mid - dt * 0.02, 0.12);
-      peak.treble = Math.max(rt, peak.treble - dt * 0.02, 0.12);
-      nb = clamp((rb / peak.bass) * params.sensitivity, 0, 1.4);
-      nm = clamp((rm / peak.mid) * params.sensitivity, 0, 1.4);
-      nt = clamp((rt / peak.treble) * params.sensitivity, 0, 1.4);
-      for (let i = 0; i < n; i++) {
-        const lo = 35 * Math.pow(300, i / n);
-        const hi = 35 * Math.pow(300, (i + 1) / n);
-        specTarget[i] = clamp(bandLevel(lo, hi) * (1 + (i / n) * 1.8) * params.sensitivity * 1.15, 0, 1);
-      }
-
-      // --- detección de beat (el bajo supera su promedio reciente) ---
-      bassHist.push(nb);
-      if (bassHist.length > 43) bassHist.shift();
-      let avg = 0;
-      for (const v of bassHist) avg += v;
-      avg /= bassHist.length;
-      if (nb > avg * params.beatThreshold + 0.04 && nb > 0.45 && t - lastBeat > 0.22) {
-        lastBeat = t;
-        levels.beat = 1;
-        beatTimes.push(t);
-        if (beatTimes.length > 12) beatTimes.shift();
-        onBeat();
-      }
-    } else if (params.idleMotion) {
-      // modo demo: respiración suave para que no se vea muerto
-      nb = 0.26 + 0.12 * Math.sin(t * 1.6);
-      nm = 0.2 + 0.1 * Math.sin(t * 0.9 + 1);
-      nt = 0.16 + 0.1 * Math.sin(t * 2.3 + 2);
-      for (let i = 0; i < n; i++) {
-        const s = Math.sin(t * 1.4 + i * 0.35);
-        specTarget[i] = 0.1 + 0.12 * s * s * (1 - i / n * 0.5);
-      }
-    }
-
-    const att = smoothK(0.75, dt);
-    const rel = smoothK(1 - params.smoothing, dt);
-    levels.bass += (nb - levels.bass) * (nb > levels.bass ? att : rel);
-    levels.mid += (nm - levels.mid) * (nm > levels.mid ? att : rel);
-    levels.treble += (nt - levels.treble) * (nt > levels.treble ? att : rel);
-    for (let i = 0; i < n; i++) {
-      spectrum[i] += (specTarget[i] - spectrum[i]) * (specTarget[i] > spectrum[i] ? att : rel);
-    }
-    levels.energy = levels.bass * 0.5 + levels.mid * 0.3 + levels.treble * 0.2;
-    levels.beat = Math.max(0, levels.beat - dt * 5);
-
-    // BPM estimado con la mediana de los intervalos entre beats
-    if (beatTimes.length >= 4) {
-      const iv = [];
-      for (let i = 1; i < beatTimes.length; i++) {
-        const d = beatTimes[i] - beatTimes[i - 1];
-        if (d > 0.3 && d < 1.0) iv.push(d);
-      }
-      if (iv.length >= 3) {
-        iv.sort((a, b) => a - b);
-        const target = 60 / iv[Math.floor(iv.length / 2)];
-        levels.bpm = levels.bpm ? levels.bpm + (target - levels.bpm) * 0.1 : target;
-      }
-    }
-    levels.playing = playing;
-    levels.time = audio.currentTime || 0;
-    levels.duration = Number.isFinite(audio.duration) ? audio.duration : 0;
-    levels.pattern = pattern;
-  }
-
-  function onBeat() {
-    beatCount++;
-    wave = 0.001;
-    if (params.autoPattern && beatCount % 8 === 0) pattern = (pattern + 1) % 4;
-    // algunos edificios se encienden con el golpe
-    for (const layer of city) {
-      const list = layer.buildings;
-      list[Math.floor(Math.random() * list.length)].flash = 1;
-      if (Math.random() < 0.5) list[Math.floor(Math.random() * list.length)].flash = 1;
-    }
-    // de vez en cuando un edificio se "re-encripta": colapsa y se regenera
-    if (Math.random() < 0.22) {
-      const layer = city[Math.floor(Math.random() * city.length)];
-      if (layer) {
-        const b = layer.buildings[Math.floor(Math.random() * layer.buildings.length)];
-        if (b.state === 'idle') b.state = 'collapsing';
-      }
-    }
-  }
-
-  // ---------- ciudad ----------
-  function shapeBuilding(b, def, keepCols) {
-    b.cell = Math.max(6, Math.round(params.glyphSize * def.scale));
-    if (!keepCols) b.cols = 4 + Math.floor(Math.random() * 6);
-    const totalRows = Math.max(
-      5,
-      Math.round((H * 0.62 * params.buildingHeight * def.hMul * Math.pow(Math.random(), 0.8) * 0.85 + H * 0.05) / b.cell)
-    );
-    // varios "pisos" que se van angostando (setbacks)
-    const tiers = [];
-    let remaining = totalRows;
-    let tc = b.cols;
-    const n = Math.random() < 0.55 ? (Math.random() < 0.4 ? 3 : 2) : 1;
-    for (let i = 0; i < n && remaining > 0; i++) {
-      const r = i === n - 1 ? remaining : Math.max(3, Math.round(remaining * rand(0.45, 0.7)));
-      const rows = Math.min(r, remaining);
-      tiers.push({ cols: tc, rows });
-      remaining -= rows;
-      tc = Math.max(2, tc - (Math.random() < 0.5 ? 2 : 1));
-    }
-    b.tiers = tiers;
-    b.rows = tiers.reduce((s, t) => s + t.rows, 0);
-    b.seed = Math.floor(Math.random() * 1e9);
-    b.ant = Math.random() < 0.5 ? Math.round(rand(8, 22) * def.scale) : 0;
-  }
-
-  // Pre-dibuja el edificio completo (cuerpo + glifos) en un canvas aparte
-  function renderBuilding(b, def) {
-    const bs = Math.min(dpr, 1.5);
-    const cell = b.cell;
-    const bw = b.cols * cell;
-    const bh = b.rows * cell;
-    const cv = document.createElement('canvas');
-    cv.width = Math.max(1, Math.ceil(bw * bs));
-    cv.height = Math.max(1, Math.ceil(bh * bs));
-    const g = cv.getContext('2d');
-    g.scale(bs, bs);
-    const rng = mulberry32(b.seed);
-    let yBottom = bh;
-    for (const t of b.tiers) {
-      const tw = t.cols * cell;
-      const th = t.rows * cell;
-      const x0 = (bw - tw) / 2;
-      const y0 = yBottom - th;
-      // cuerpo oscuro y opaco (tapa la lluvia que está detrás)
-      const grad = g.createLinearGradient(0, y0, 0, yBottom);
-      grad.addColorStop(0, 'rgba(0,26,9,1)');
-      grad.addColorStop(1, 'rgba(0,9,4,1)');
-      g.fillStyle = grad;
-      g.fillRect(x0, y0, tw, th);
-      // retícula de glifos "encriptados"
-      for (let r = 0; r < t.rows; r++) {
-        for (let c = 0; c < t.cols; c++) {
-          const gi = Math.floor(rng() * GLYPHS.length);
-          const lit = rng() < 0.22;
-          g.globalAlpha = (lit ? 0.55 + rng() * 0.45 : 0.08 + rng() * 0.22) * def.bright;
-          g.drawImage(atlasGreen, gi * AS, 0, AS, AS, x0 + c * cell, y0 + r * cell, cell, cell);
-        }
-      }
-      // líneas de piso tenues
-      g.globalAlpha = 0.14 * def.bright;
-      g.fillStyle = hsla(BASE, 100, 50, 1);
-      for (let r = 4; r < t.rows; r += 4) g.fillRect(x0, y0 + r * cell, tw, 1);
-      // bordes brillantes
-      g.globalAlpha = 0.9 * def.bright;
-      g.fillStyle = hsla(BASE, 100, 58, 1);
-      g.fillRect(x0, y0, 1, th);
-      g.fillRect(x0 + tw - 1, y0, 1, th);
-      g.fillRect(x0, y0, tw, 2);
-      g.globalAlpha = 1;
-      yBottom = y0;
-    }
-    return cv;
-  }
-
-  function makeBuilding(def, x, index) {
-    const b = {
-      x,
-      state: 'growing',
-      grow: -(index * 0.06 + rand(0, 1.2)), // se construyen escalonados al inicio
-      growSpeed: rand(0.5, 1.1),
-      flash: 0,
-      phase: rand(0, TAU),
-    };
-    shapeBuilding(b, def, false);
-    b.buf = renderBuilding(b, def);
-    return b;
-  }
-
-  function regenerateBuilding(b, def) {
-    shapeBuilding(b, def, true);
-    b.buf = renderBuilding(b, def);
-  }
-
-  function buildCity() {
-    city = LAYERS.map((def) => {
-      const buildings = [];
-      let x = 0;
-      const target = W + 260;
-      let i = 0;
-      while (x < target) {
-        const b = makeBuilding(def, x, i++);
-        buildings.push(b);
-        x += b.cols * b.cell + rand(def.gap[0], def.gap[1]) / params.buildingDensity;
-      }
-      return { def, buildings, span: x, offset: Math.random() * 1000 };
-    });
-  }
-
-  function updateCity(dt) {
-    for (const layer of city) {
-      layer.offset += dt * 40 * layer.def.speed * params.citySpeed;
-      for (const b of layer.buildings) {
-        b.flash = Math.max(0, b.flash - dt * 2.2);
-        if (b.state === 'growing') {
-          b.grow += dt * b.growSpeed;
-          if (b.grow >= 1) { b.grow = 1; b.state = 'idle'; }
-        } else if (b.state === 'collapsing') {
-          b.grow -= dt * 2.8;
-          if (b.grow <= 0) {
-            regenerateBuilding(b, layer.def);
-            b.grow = 0;
-            b.state = 'growing';
-          }
-        }
-      }
-    }
-  }
-
-  function drawBuilding(b, def, x, gy, t) {
-    if (b.grow <= 0.001) return;
-    const e = easeOutCubic(clamp(b.grow, 0, 1));
-    const bw = b.cols * b.cell;
-    const pulse = 1 + params.buildingPulse * levels.bass * 0.05 * def.scale;
-    const fullH = b.rows * b.cell;
-    const dh = fullH * e * pulse;
-    const sh = b.buf.height * e;
-    const sy = b.buf.height - sh;
-    ctx.globalAlpha = 1;
-    ctx.drawImage(b.buf, 0, sy, b.buf.width, sh, x, gy - dh, bw, dh);
-
-    // cabeza brillante mientras se "construye"
-    if (b.grow < 1) {
-      ctx.globalCompositeOperation = 'lighter';
-      ctx.fillStyle = hsla(BASE, 100, 70, 0.9);
-      ctx.fillRect(x, gy - dh, bw, 2);
-      ctx.globalCompositeOperation = 'source-over';
-    }
-    // destello cuando le toca el beat
-    if (b.flash > 0.02) {
-      ctx.globalCompositeOperation = 'lighter';
-      ctx.globalAlpha = b.flash * 0.6;
-      ctx.drawImage(b.buf, 0, sy, b.buf.width, sh, x, gy - dh, bw, dh);
-      ctx.globalCompositeOperation = 'source-over';
-      ctx.globalAlpha = 1;
-    }
-    if (e < 0.98) return;
-
-    // glifos que parpadean (datos "vivos")
-    const t0 = b.tiers[0];
-    ctx.globalAlpha = 0.9 * def.bright;
-    for (let k = 0; k < 2; k++) {
-      const c = Math.floor(Math.random() * t0.cols);
-      const r = Math.floor(Math.random() * t0.rows);
-      const gi = Math.floor(Math.random() * GLYPHS.length);
-      ctx.drawImage(
-        atlasHead, gi * AS, 0, AS, AS,
-        x + ((b.cols - t0.cols) * b.cell) / 2 + c * b.cell,
-        gy - (r + 1) * b.cell, b.cell, b.cell
-      );
-    }
-    ctx.globalAlpha = 1;
-
-    // antena con luz intermitente
-    if (b.ant > 0) {
-      const cx = x + bw / 2;
-      const topY = gy - dh;
-      ctx.fillStyle = hsla(BASE, 100, 60, 0.7 * def.bright);
-      ctx.fillRect(cx - 0.5, topY - b.ant, 1, b.ant);
-      if (Math.sin(t * 2.4 + b.phase) > 0.4) {
-        ctx.globalCompositeOperation = 'lighter';
-        ctx.fillStyle = hsla(BASE + 40, 100, 70, 0.9 * def.bright);
-        ctx.beginPath(); ctx.arc(cx, topY - b.ant, 1.6, 0, TAU); ctx.fill();
-        ctx.fillStyle = hsla(BASE + 40, 100, 60, 0.15 * def.bright);
-        ctx.beginPath(); ctx.arc(cx, topY - b.ant, 7, 0, TAU); ctx.fill();
-        ctx.globalCompositeOperation = 'source-over';
-      }
-    }
-  }
-
-  function drawCity(t) {
-    const hy = H * params.horizon;
-    const fh = H - hy;
-    for (const layer of city) {
-      const def = layer.def;
-      const gy = hy + fh * def.ground;
-      for (const b of layer.buildings) {
-        const bw = b.cols * b.cell;
-        const bx = mod(b.x - layer.offset, layer.span);
-        if (bx < W) drawBuilding(b, def, bx, gy, t);
-        const bx2 = bx - layer.span;
-        if (bx2 + bw > 0) drawBuilding(b, def, bx2, gy, t);
-      }
-      // bruma verde en la base de cada capa → sensación de profundidad
-      ctx.globalCompositeOperation = 'lighter';
-      const fog = ctx.createLinearGradient(0, gy - 110 * def.scale, 0, gy);
-      fog.addColorStop(0, hsla(BASE, 100, 40, 0));
-      fog.addColorStop(1, hsla(BASE, 100, 40, 0.1 + levels.bass * 0.08));
-      ctx.fillStyle = fog;
-      ctx.fillRect(0, gy - 110 * def.scale, W, 110 * def.scale);
-      ctx.globalCompositeOperation = 'source-over';
-    }
-  }
-
-  // ---------- lluvia matrix ----------
-  const randGlyph = () => Math.floor(Math.random() * GLYPHS.length);
-
-  function newDrop(i, initial, rows) {
-    return {
-      i,
-      y: initial ? rand(-rows, rows) : rand(-30, -2),
-      speed: rand(8, 24),
-      lenFrac: rand(0.5, 1),
-      active: Math.random(),
-      g: Array.from({ length: 32 }, randGlyph),
-    };
-  }
-
-  function buildRain() {
-    const cols = Math.ceil(W / rainCell);
-    const rows = Math.ceil(H / rainCell);
-    rain = Array.from({ length: cols }, (_, i) => newDrop(i, true, rows));
-  }
-
-  function updateRain(dt) {
-    const rows = Math.ceil(H / rainCell);
-    const mul = params.rainSpeed * (0.6 + levels.treble * 1.2 + levels.beat * 0.8);
-    for (const d of rain) {
-      d.y += d.speed * dt * mul;
-      if (d.y - params.rainTrail * d.lenFrac > rows) Object.assign(d, newDrop(d.i, false, rows));
-    }
-    // mutación de glifos
-    for (let k = 0; k < 10; k++) {
-      const d = rain[Math.floor(Math.random() * rain.length)];
-      if (d) d.g[Math.floor(Math.random() * 32)] = randGlyph();
-    }
-  }
-
-  function drawRain() {
-    const rows = Math.ceil(H / rainCell) + 1;
-    const boost = 0.55 + levels.treble * 0.25;
-    for (const d of rain) {
-      if (d.active > params.rainDensity) continue;
-      const len = Math.max(4, Math.round(params.rainTrail * d.lenFrac));
-      const head = Math.floor(d.y);
-      const x = d.i * rainCell;
-      for (let j = 0; j < len; j++) {
-        const gy = head - j;
-        if (gy < 0 || gy > rows) continue;
-        ctx.globalAlpha = Math.pow(1 - j / len, 1.7) * boost;
-        ctx.drawImage(
-          j === 0 ? atlasHead : atlasGreen,
-          d.g[mod(gy, 32)] * AS, 0, AS, AS,
-          x, gy * rainCell, rainCell, rainCell
-        );
-      }
-    }
-    ctx.globalAlpha = 1;
-  }
-
-  // ---------- cielo, sol y piso ----------
-  function buildSun() {
-    sunR = Math.min(W, H) * 0.28;
-    const R = Math.ceil(sunR);
-    const c = document.createElement('canvas');
-    c.width = c.height = R * 2;
-    const g = c.getContext('2d');
-    const grad = g.createLinearGradient(0, 0, 0, R * 2);
-    grad.addColorStop(0, hsla(BASE - 35, 100, 62, 1));
-    grad.addColorStop(0.55, hsla(BASE, 100, 48, 1));
-    grad.addColorStop(1, hsla(BASE + 15, 100, 28, 1));
-    g.fillStyle = grad;
-    g.beginPath(); g.arc(R, R, R, 0, TAU); g.fill();
-    // franjas horizontales (sol retro)
-    g.globalCompositeOperation = 'destination-out';
-    for (let k = 0; k < 9; k++) {
-      g.fillRect(0, R * 1.1 + k * R * 0.1 + k * k * 1.1, R * 2, 2 + k * 1.7);
-    }
-    sunCanvas = c;
-  }
-
-  function drawSky() {
-    const hy = H * params.horizon;
-    const g = ctx.createLinearGradient(0, 0, 0, hy);
-    g.addColorStop(0, '#000603');
-    g.addColorStop(0.6, '#00150a');
-    g.addColorStop(1, hsla(BASE, 100, 11 + levels.bass * 7, 1));
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, W, hy + 2);
-  }
-
-  function drawSun() {
-    if (!sunCanvas) return;
-    const hy = H * params.horizon;
-    const R = sunR * (1 + levels.bass * 0.06 + levels.beat * 0.03);
-    ctx.globalAlpha = 0.8 * (0.7 + levels.bass * 0.3);
-    ctx.drawImage(sunCanvas, W / 2 - R, hy - R * 1.35, R * 2, R * 2);
-    ctx.globalAlpha = 1;
-    ctx.globalCompositeOperation = 'lighter';
-    const halo = ctx.createRadialGradient(W / 2, hy - R * 0.35, R * 0.6, W / 2, hy - R * 0.35, R * 1.7);
-    halo.addColorStop(0, hsla(BASE, 100, 50, 0.16 + levels.bass * 0.1));
-    halo.addColorStop(1, hsla(BASE, 100, 50, 0));
-    ctx.fillStyle = halo;
-    ctx.fillRect(0, 0, W, hy + 4);
-    ctx.globalCompositeOperation = 'source-over';
-  }
-
-  function drawFloor(dt) {
-    const hy = H * params.horizon;
-    const fh = H - hy;
-    const g = ctx.createLinearGradient(0, hy, 0, H);
-    g.addColorStop(0, hsla(BASE, 100, 9, 1));
-    g.addColorStop(1, '#000402');
-    ctx.fillStyle = g;
-    ctx.fillRect(0, hy, W, fh + 1);
-
-    const glow = params.gridGlow * (0.6 + levels.bass * 0.8 + levels.beat * 0.5);
-    ctx.globalCompositeOperation = 'lighter';
-    ctx.fillStyle = hsla(BASE, 100, 55, clamp(0.55 * glow, 0, 1));
-    ctx.fillRect(0, hy - 1, W, 2);
-
-    if (params.showGrid) {
-      gridZ = mod(gridZ + dt * 0.18 * params.gridSpeed * (0.35 + levels.energy * 1.8), 1);
-      ctx.lineWidth = 1;
-      const rows = 16;
-      for (let i = 0; i < rows; i++) {
-        const tt = (i + gridZ) / rows;
-        const y = hy + fh * tt * tt;
-        ctx.strokeStyle = hsla(BASE, 100, 55, clamp((0.08 + 0.55 * tt) * glow, 0, 1));
-        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
-      }
-      const vx = W / 2;
-      const spacingB = W * 0.08;
-      ctx.strokeStyle = hsla(BASE, 100, 55, clamp(0.35 * glow, 0, 1));
+  for (const x of [28, width - 28]) {
+    for (const y of [28, height - 28]) {
+      const sx = x < width / 2 ? 1 : -1;
+      const sy = y < height / 2 ? 1 : -1;
       ctx.beginPath();
-      for (let k = -24; k <= 24; k++) {
-        ctx.moveTo(vx + k * 4, hy);
-        ctx.lineTo(vx + k * spacingB, H);
-      }
+      ctx.moveTo(x, y + sy * 28);
+      ctx.lineTo(x, y);
+      ctx.lineTo(x + sx * 28, y);
       ctx.stroke();
     }
-    // onda de luz que viaja por el piso con cada beat
-    if (wave > 0) {
-      wave += dt * 1.6;
-      if (wave >= 1) wave = 0;
-      else {
-        const y = hy + fh * wave * wave;
-        ctx.fillStyle = hsla(BASE + 20, 100, 65, (1 - wave) * 0.7);
-        ctx.fillRect(0, y, W, 2);
-      }
-    }
-    ctx.globalCompositeOperation = 'source-over';
   }
 
-  // ---------- láseres ----------
-  function drawLasers(t) {
-    const n = Math.round(params.laserCount);
-    const len = Math.hypot(W, H) * 1.15;
-    const sweep = params.laserSweep;
-    const spd = params.laserSpeed;
-    const inten = clamp(0.3 + 0.5 * levels.mid + 0.9 * levels.beat, 0, 1.4);
-    ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = 0.42;
+  ctx.beginPath();
+  ctx.moveTo(48, 66); ctx.lineTo(260, 66);
+  ctx.moveTo(width - 250, 66); ctx.lineTo(width - 48, 66);
+  ctx.moveTo(48, height - 66); ctx.lineTo(220, height - 66);
+  ctx.moveTo(width - 220, height - 66); ctx.lineTo(width - 48, height - 66);
+  ctx.stroke();
+  for (let x = 48; x < width - 48; x += 8) {
+    ctx.fillRect(x, 40, 1, 5);
+    ctx.fillRect(x, height - 45, 1, 5);
+  }
+
+  ctx.globalAlpha = 0.78;
+  ctx.fillText('NEURAL LINK  /  ONLINE', 50, 56);
+  ctx.textAlign = 'right';
+  ctx.fillText('SYS.04  //  DATA STREAM', width - 50, 56);
+  ctx.textAlign = 'left';
+  ctx.fillText('SIGNAL: STABLE', 50, height - 44);
+  ctx.textAlign = 'right';
+  ctx.fillText('ARCHIVE  //  199X', width - 50, height - 44);
+
+  ctx.globalAlpha = 0.32;
+  for (let i = 0; i < 9; i++) {
+    const barHeight = 5 + ((i * 13) % 17);
+    ctx.fillRect(50 + i * 8, height - 92 - barHeight, 3, barHeight);
+    ctx.fillRect(width - 122 + i * 8, 84, 3, 5 + ((i * 7) % 15));
+  }
+
+  ctx.globalAlpha = 1;
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
+}
+
+// Caja con UV escaladas para que las ventanas mantengan su tamaño
+function makeBoxGeometry(uRepeat, vRepeat) {
+  const geo = new THREE.BoxGeometry(1, 1, 1);
+  const uv = geo.attributes.uv;
+  for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * uRepeat, uv.getY(i) * vRepeat);
+  uv.needsUpdate = true;
+  return geo;
+}
+
+// =====================================================================
+//  VideoTexture + CHROMA KEY de fondo negro
+// =====================================================================
+function createVideoSource(file, onMeta) {
+  const video = document.createElement('video');
+  video.muted = true;
+  video.defaultMuted = true;
+  video.loop = true;
+  video.playsInline = true;
+  video.setAttribute('playsinline', '');
+  video.setAttribute('webkit-playsinline', '');
+  video.preload = 'auto';
+  video.crossOrigin = 'anonymous';
+
+  const src = { video, texture: null, aspect: 16 / 9, failed: false };
+  video.addEventListener('loadedmetadata', () => {
+    if (video.videoWidth && video.videoHeight) {
+      src.aspect = video.videoWidth / video.videoHeight;
+      if (onMeta) onMeta();
+    }
+  });
+  attachSourceFallback(video, file, () => {
+    src.failed = true;
+    console.warn('No se pudo cargar el video:', file);
+  });
+
+  const tex = new THREE.VideoTexture(video);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.generateMipmaps = false;
+  src.texture = tex;
+  return src;
+}
+
+const CHROMA_VERT = /* glsl */ `
+  varying vec2 vUv;
+  void main() {
+    vUv = uv;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+
+const CHROMA_FRAG = /* glsl */ `
+  uniform sampler2D map;
+  uniform float uThreshold;
+  uniform float uSoftness;
+  uniform float uOpacity;
+  uniform float uTime;
+  uniform float uGlitch;
+  uniform float uBeat;
+  uniform vec3 uTintGreen;
+  uniform vec3 uTintOrange;
+  uniform float uTintStrength;
+  varying vec2 vUv;
+
+  float hash(float n) { return fract(sin(n) * 43758.5453123); }
+
+  void main() {
+    vec2 uv = vUv;
+
+    // Glitch propio del personaje: tiras horizontales desplazadas + separación RGB
+    float band = floor(uv.y * 24.0);
+    float tick = floor(uTime * 14.0);
+    float on = step(0.72, hash(band * 7.13 + tick));
+    uv.x += (hash(band * 91.7 + tick * 13.3) - 0.5) * 0.07 * uGlitch * on;
+    float s = 0.012 * uGlitch;
+
+    vec3 col;
+    col.r = texture2D(map, uv + vec2(s, 0.0)).r;
+    col.g = texture2D(map, uv).g;
+    col.b = texture2D(map, uv - vec2(s, 0.0)).b;
+
+    // ---- CHROMA KEY NEGRO ----
+    // El negro puro y los grises muy oscuros tienen max(r,g,b) ~ 0.
+    float luma = max(col.r, max(col.g, col.b));
+    float alpha = smoothstep(uThreshold, uThreshold + uSoftness, luma);
+    if (alpha < 0.004) discard;
+
+    float greenMask = smoothstep(0.035, 0.22, col.g - max(col.r, col.b));
+    float orangeMask = smoothstep(0.025, 0.18, col.r - max(col.g, col.b))
+      * smoothstep(0.0, 0.16, col.g - col.b);
+    float brightness = dot(col, vec3(0.2126, 0.7152, 0.0722));
+    vec3 greenTint = uTintGreen * (0.3 + brightness * 1.65);
+    vec3 orangeTint = uTintOrange * (0.3 + brightness * 1.65);
+    col = mix(col, greenTint, greenMask * uTintStrength);
+    col = mix(col, orangeTint, orangeMask * uTintStrength);
+    col *= 1.0 + uBeat * 0.35;
+    gl_FragColor = vec4(col, alpha * uOpacity);
+    #include <colorspace_fragment>
+  }
+`;
+
+function createChromaMaterial(texture) {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      map: { value: texture },
+      uThreshold: { value: PARAMS.chroma.threshold },
+      uSoftness: { value: PARAMS.chroma.softness },
+      uOpacity: { value: 1 },
+      uTime: { value: 0 },
+      uGlitch: { value: 0 },
+      uBeat: { value: 0 },
+      uTintGreen: { value: new THREE.Color(0xffffff) },
+      uTintOrange: { value: new THREE.Color(0xffffff) },
+      uTintStrength: { value: 0 },
+    },
+    vertexShader: CHROMA_VERT,
+    fragmentShader: CHROMA_FRAG,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+}
+
+function createColorGradeMaterial(texture) {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      map: { value: texture },
+      uOpacity: { value: 1 },
+      uTint: { value: new THREE.Color(0xffffff) },
+      uTintStrength: { value: 0 },
+      uBeat: { value: 0 },
+      uEnergy: { value: 0 },
+    },
+    vertexShader: CHROMA_VERT,
+    fragmentShader: /* glsl */ `
+      uniform sampler2D map;
+      uniform float uOpacity;
+      uniform float uTintStrength;
+      uniform float uBeat;
+      uniform float uEnergy;
+      uniform vec3 uTint;
+      varying vec2 vUv;
+      void main() {
+        vec3 color = texture2D(map, vUv).rgb;
+        float luminance = dot(color, vec3(0.2126, 0.7152, 0.0722));
+        vec3 tinted = mix(color, luminance * uTint, uTintStrength);
+        tinted *= 1.0 + uBeat * 0.04 + uEnergy * 0.015;
+        gl_FragColor = vec4(tinted, uOpacity);
+        #include <colorspace_fragment>
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+}
+
+class VideoLayer {
+  constructor(file, height, fullscreen = false, chromaKey = true) {
+    this.height = height;
+    this.fullscreen = fullscreen;
+    this.src = createVideoSource(file, () => this.fit());
+    this.material = chromaKey
+      ? createChromaMaterial(this.src.texture)
+      : createColorGradeMaterial(this.src.texture);
+    this.mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), this.material);
+    this.mesh.renderOrder = 5;
+    this._center = new THREE.Vector3();
+    this._parentQuaternion = new THREE.Quaternion();
+    this._cameraQuaternion = new THREE.Quaternion();
+    this.fit();
+  }
+  fit() {
+    this.mesh.scale.set(this.height * this.src.aspect, this.height, 1);
+  }
+  fitToCamera(camera, center, parent) {
+    if (!this.fullscreen) return;
+
+    camera.getWorldQuaternion(this._cameraQuaternion);
+    parent.updateWorldMatrix(true, false);
+    this._center.copy(center);
+    this.mesh.position.copy(parent.worldToLocal(this._center));
+    parent.getWorldQuaternion(this._parentQuaternion);
+    this.mesh.quaternion.copy(this._parentQuaternion.invert()).multiply(this._cameraQuaternion);
+
+    const distance = camera.position.distanceTo(center);
+    const viewHeight = 2 * distance * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2);
+    const viewWidth = viewHeight * camera.aspect;
+    const height = Math.max(viewHeight, viewWidth / this.src.aspect);
+    this.mesh.scale.set(height * this.src.aspect, height, 1);
+  }
+  play() {
+    const p = this.src.video.play();
+    if (p && p.catch) p.catch(() => {});
+  }
+  pause() {
+    this.src.video.pause();
+  }
+  // Se llama cada frame desde la escena
+  tick(t, glitch, beatEnv, energy = 0) {
+    const u = this.material.uniforms;
+    if (u.uTime) u.uTime.value = t;
+    if (u.uGlitch) u.uGlitch.value = glitch;
+    if (u.uBeat) u.uBeat.value = beatEnv;
+    if (u.uEnergy) u.uEnergy.value = energy;
+    if (u.uThreshold) u.uThreshold.value = PARAMS.chroma.threshold;
+    if (u.uSoftness) u.uSoftness.value = PARAMS.chroma.softness;
+    this.mesh.visible = !this.src.failed;
+  }
+}
+
+// =====================================================================
+//  Puntos luminosos con tamaño/brillo por vértice (estrellas, cometas)
+// =====================================================================
+function createGlowPoints(count, { twinkle = 0 } = {}) {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(count * 3), 3));
+  geometry.setAttribute('aColor', new THREE.BufferAttribute(new Float32Array(count * 3), 3));
+  geometry.setAttribute('aSize', new THREE.BufferAttribute(new Float32Array(count), 1));
+  geometry.setAttribute('aPhase', new THREE.BufferAttribute(new Float32Array(count), 1));
+  const material = new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uOpacity: { value: 1 },
+      uPx: SHARED.px,
+      uTwinkle: { value: twinkle },
+    },
+    vertexShader: /* glsl */ `
+      attribute vec3 aColor;
+      attribute float aSize;
+      attribute float aPhase;
+      uniform float uTime;
+      uniform float uPx;
+      uniform float uTwinkle;
+      varying vec3 vColor;
+      varying float vTw;
+      void main() {
+        vColor = aColor;
+        float tw = 1.0 - uTwinkle + uTwinkle * (0.5 + 0.5 * sin(uTime * (1.5 + aPhase * 0.3) + aPhase * 6.2831));
+        vTw = tw;
+        gl_PointSize = aSize * uPx * (0.6 + 0.4 * tw);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      uniform float uOpacity;
+      varying vec3 vColor;
+      varying float vTw;
+      void main() {
+        float d = length(gl_PointCoord - 0.5);
+        float a = smoothstep(0.5, 0.0, d);
+        a *= a;
+        gl_FragColor = vec4(vColor * vTw, a * uOpacity);
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+  const points = new THREE.Points(geometry, material);
+  points.frustumCulled = false;
+  return { points, material, geometry };
+}
+
+// =====================================================================
+//  Anillos que se expanden por el suelo en cada beat
+// =====================================================================
+class RingPool {
+  constructor(owner, y, n = 5) {
+    this.items = [];
+    const geo = new THREE.RingGeometry(0.94, 1, 72);
     for (let i = 0; i < n; i++) {
-      const fromTop = i % 2 === 1;
-      const ox = ((i + 0.5) / n) * W;
-      const oy = fromTop ? -10 : H + 10;
-      const base = fromTop ? Math.PI / 2 : -Math.PI / 2;
-      let sw;
-      switch (pattern) {
-        case 1: // abanico sincronizado
-          sw = Math.sin(t * spd * 0.9) * sweep * ((i / Math.max(1, n - 1)) * 2 - 1);
-          break;
-        case 2: // haces que se cruzan
-          sw = Math.sin(t * spd * 1.2 + (fromTop ? 0 : Math.PI)) * sweep * (ox < W / 2 ? 1 : -1);
-          break;
-        case 3: // barrido tipo escáner
-          sw = (mod(t * spd * 0.35 + i * 0.1, 1) * 2 - 1) * sweep;
-          break;
-        default: // cada haz por su lado
-          sw = Math.sin(t * spd * (0.5 + 0.13 * i) + i * 1.7) * sweep;
-      }
-      const ang = base + sw + levels.beat * 0.1 * (i % 3 - 1);
-      const dx = Math.cos(ang);
-      const dy = Math.sin(ang);
-      const ex = ox + dx * len;
-      const ey = oy + dy * len;
-      const hue = LASER_HUES[i % LASER_HUES.length];
-
-      // cono de niebla
-      if (params.laserFog > 0.01) {
-        const spread = 0.018 + 0.02 * levels.bass;
-        const px = -dy * len * spread;
-        const py = dx * len * spread;
-        const fog = ctx.createLinearGradient(ox, oy, ex, ey);
-        fog.addColorStop(0, hsla(hue, 100, 50, clamp(0.2 * params.laserFog * inten, 0, 1)));
-        fog.addColorStop(1, hsla(hue, 100, 50, 0));
-        ctx.fillStyle = fog;
-        ctx.beginPath();
-        ctx.moveTo(ox, oy);
-        ctx.lineTo(ex + px, ey + py);
-        ctx.lineTo(ex - px, ey - py);
-        ctx.closePath();
-        ctx.fill();
-      }
-      // haz (halo + núcleo)
-      const lw = (1 + levels.bass * 2.2) * params.laserWidth;
-      const core = ctx.createLinearGradient(ox, oy, ex, ey);
-      core.addColorStop(0, hsla(hue, 100, 75, clamp(0.95 * inten, 0, 1)));
-      core.addColorStop(1, hsla(hue, 100, 60, 0.05));
-      ctx.strokeStyle = core;
-      ctx.lineWidth = lw * 5;
-      ctx.globalAlpha = 0.14;
-      ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(ex, ey); ctx.stroke();
-      ctx.globalAlpha = 1;
-      ctx.lineWidth = lw;
-      ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(ex, ey); ctx.stroke();
-      // destello en el emisor
-      const fl = ctx.createRadialGradient(ox, oy, 0, ox, oy, 46);
-      fl.addColorStop(0, hsla(hue, 100, 70, clamp(0.7 * inten, 0, 1)));
-      fl.addColorStop(1, hsla(hue, 100, 50, 0));
-      ctx.fillStyle = fl;
-      ctx.fillRect(ox - 46, oy - 46, 92, 92);
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0xffffff,
+        transparent: true,
+        opacity: 0,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        fog: false,
+      });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.rotation.x = -Math.PI / 2;
+      mesh.position.y = y;
+      mesh.visible = false;
+      mesh.renderOrder = 1;
+      owner.group.add(mesh);
+      this.items.push({ mesh, rec: owner.fade(mat, 0), life: 0, dur: 1.3, speed: 14, amp: 1, active: false });
     }
-    ctx.globalCompositeOperation = 'source-over';
   }
+  spawn(strength = 1, color = null) {
+    const it = this.items.find((i) => !i.active) || this.items[0];
+    it.active = true;
+    it.life = 0;
+    it.amp = strength;
+    if (color !== null) it.mesh.material.color.set(color);
+    it.mesh.visible = true;
+  }
+  update(dt) {
+    for (const it of this.items) {
+      if (!it.active) continue;
+      it.life += dt;
+      const p = it.life / it.dur;
+      if (p >= 1) {
+        it.active = false;
+        it.mesh.visible = false;
+        it.rec.base = 0;
+        continue;
+      }
+      const s = 1 + p * it.speed;
+      it.mesh.scale.set(s, s, s);
+      it.rec.base = (1 - p) * (1 - p) * 0.9 * it.amp;
+    }
+  }
+}
 
-  // ---------- ecualizador LED retro ----------
-  const BAR_COLORS = Array.from({ length: 16 }, (_, s) => hsla(BASE - 38 * (s / 15), 100, 50 + s * 0.8, 0.88));
+// =====================================================================
+//  Escena base
+// =====================================================================
+class BaseScene {
+  constructor(name) {
+    this.name = name;
+    this.group = new THREE.Group();
+    this.group.visible = false;
+    this.fades = [];
+    this.opacity = 0;
+    this.playing = false;
+    this.bg = new THREE.Color(0x000000);
+    this.fogDensity = 0.02;
+    this.cam = { pos: new THREE.Vector3(0, 0.8, 9.5), look: new THREE.Vector3(0, 0, 0) };
+    this.accentColors = [new THREE.Color(0xffffff)];
+    this.video = null;
+  }
+  // Registra un material para que respete el fundido entre escenas
+  fade(material, base = 1) {
+    const rec = { material, base };
+    material.transparent = true;
+    this.fades.push(rec);
+    return rec;
+  }
+  setOpacity(o) {
+    this.opacity = o;
+    this.group.visible = o > 0.002;
+  }
+  applyFade() {
+    for (const f of this.fades) {
+      const m = f.material;
+      const v = this.opacity * f.base;
+      if (m.uniforms && m.uniforms.uOpacity) m.uniforms.uOpacity.value = v;
+      else m.opacity = v;
+    }
+  }
+  pickAccent() {
+    return this.accentColors[Math.floor(Math.random() * this.accentColors.length)];
+  }
+  enter() { if (this.video) this.video.play(); }
+  leave() { if (this.video) this.video.pause(); }
+  onBeat() {}
+  onDrop() {}
+  onPeak() {}
+  lights() {}
+  update() {}
+}
 
-  function drawBars(dt) {
-    const n = config.bandsCount;
-    const bw = W / n;
-    const maxH = H * 0.16;
-    const seg = 7, gap = 2;
-    const maxSeg = Math.floor(maxH / (seg + gap));
-    if (!drawBars.peaks) drawBars.peaks = new Float32Array(n);
-    const pk = drawBars.peaks;
-    ctx.globalCompositeOperation = 'lighter';
+// =====================================================================
+//  ESCENA 1 — Discoteca (anim1: personaje verde entre gente naranja)
+// =====================================================================
+class ClubScene extends BaseScene {
+  constructor() {
+    super('club');
+    const C = PARAMS.colors.club;
+    this.bg.set(C.bg);
+    this.fogDensity = 0.03;
+    this.palettes = C.palettes.map(({ green, orange }) => ({
+      green: new THREE.Color(green),
+      orange: new THREE.Color(orange),
+    }));
+    this.green = this.palettes[0].green.clone();
+    this.orange = this.palettes[0].orange.clone();
+    this.accentColors = [this.green, this.orange];
+    this.flip = false;
+    this.boost = 0;
+
+    // Video con chroma key
+    this.video = new VideoLayer(PARAMS.assets.videos[0], PARAMS.video.featuredHeight, true);
+    this.video.material.uniforms.uTintGreen.value.copy(this.green);
+    this.video.material.uniforms.uTintOrange.value.copy(this.orange);
+    this.video.material.uniforms.uTintStrength.value = 0.88;
+    this.group.add(this.video.mesh);
+    this.fade(this.video.material);
+
+    // Halo detrás del personaje
+    this.dot = makeDotTexture();
+    this.halo = new THREE.Sprite(
+      new THREE.SpriteMaterial({ map: this.dot, color: C.green, blending: THREE.AdditiveBlending, depthWrite: false })
+    );
+    this.halo.position.set(0, 0, -0.4);
+    this.halo.scale.set(9, 9, 1);
+    this.halo.renderOrder = 2;
+    this.haloFade = this.fade(this.halo.material, 0.4);
+    this.group.add(this.halo);
+
+    // Pista de baile: tablero de neón verde/naranja
+    this.floorMat = new THREE.ShaderMaterial({
+      uniforms: {
+        uTime: { value: 0 },
+        uBass: { value: 0 },
+        uOpacity: { value: 1 },
+        uA: { value: this.green },
+        uB: { value: this.orange },
+      },
+      vertexShader: /* glsl */ `
+        varying vec2 vUv;
+        void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }
+      `,
+      fragmentShader: /* glsl */ `
+        uniform float uTime; uniform float uBass; uniform float uOpacity;
+        uniform vec3 uA; uniform vec3 uB;
+        varying vec2 vUv;
+        void main() {
+          vec2 p = (vUv - 0.5) * 40.0;
+          vec2 id = floor(p);
+          float chk = mod(id.x + id.y, 2.0);
+          float d = length(p);
+          float wave = 0.5 + 0.5 * sin(d * 0.8 - uTime * 3.0);
+          float lit = step(0.5, fract(sin(dot(id, vec2(12.9898, 78.233)) + floor(uTime * 2.0)) * 43758.5453));
+          vec3 col = mix(uA, uB, chk);
+          float inten = (0.05 + 0.6 * uBass * wave) * (0.4 + 0.6 * lit);
+          vec2 f = abs(fract(p) - 0.5);
+          float line = smoothstep(0.46, 0.5, max(f.x, f.y));
+          vec3 c = col * inten + col * line * (0.25 + 0.5 * uBass);
+          float mask = smoothstep(20.0, 4.0, d);
+          gl_FragColor = vec4(c, mask * uOpacity * 0.9);
+        }
+      `,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    const floor = new THREE.Mesh(new THREE.PlaneGeometry(40, 40), this.floorMat);
+    floor.rotation.x = -Math.PI / 2;
+    floor.position.y = FLOOR_Y;
+    floor.renderOrder = 0;
+    this.group.add(floor);
+    this.fade(this.floorMat);
+
+    // Láseres de discoteca
+    const beamGeo = new THREE.CylinderGeometry(0.015, 0.06, 1, 8, 1, true);
+    beamGeo.translate(0, -0.5, 0);
+    this.beams = [];
+    const nb = N(28);
+    for (let i = 0; i < nb; i++) {
+      const pivot = new THREE.Group();
+      const ang = (i / nb) * Math.PI * 2;
+      pivot.position.set(Math.cos(ang) * 4.5, 6.5, -2 + Math.sin(ang) * 3);
+      const mat = new THREE.MeshBasicMaterial({
+        color: i % 2 ? this.orange : this.green,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        fog: false,
+      });
+      const beam = new THREE.Mesh(beamGeo, mat);
+      beam.scale.set(1, 18, 1);
+      beam.renderOrder = 1;
+      pivot.add(beam);
+      this.group.add(pivot);
+      this.beams.push({ pivot, beam, phase: rand(0, 6.28), speed: rand(0.5, 1.4) });
+      this.fade(mat, 0.55);
+    }
+
+    // Bola disco
+    const ballMat = new THREE.MeshStandardMaterial({ color: 0xcccccc, metalness: 0.9, roughness: 0.2, flatShading: true });
+    this.ball = new THREE.Mesh(new THREE.IcosahedronGeometry(0.8, 2), ballMat);
+    this.ball.position.set(0, 6.0, -2);
+    this.group.add(this.ball);
+    this.fade(ballMat);
+    const wireMat = new THREE.MeshBasicMaterial({
+      color: this.green, wireframe: true, blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
+    });
+    this.ballWire = new THREE.Mesh(new THREE.IcosahedronGeometry(0.83, 2), wireMat);
+    this.ballWire.position.copy(this.ball.position);
+    this.group.add(this.ballWire);
+    this.fade(wireMat, 0.35);
+
+    // Partículas (confeti / polvo de club)
+    const n = N(1400);
+    this.pCount = n;
+    const pos = new Float32Array(n * 3);
+    const col = new Float32Array(n * 3);
+    this.pColorGroup = new Uint8Array(n);
+    this.pSpeed = new Float32Array(n);
     for (let i = 0; i < n; i++) {
-      const v = spectrum[i];
-      pk[i] = Math.max(v, pk[i] - dt * 0.35);
-      const ns = Math.floor((v * maxH) / (seg + gap));
-      for (let s = 0; s < ns; s++) {
-        ctx.fillStyle = BAR_COLORS[Math.min(15, Math.floor((s / maxSeg) * 15))];
-        ctx.fillRect(i * bw + 1, H - (s + 1) * (seg + gap), bw - 2, seg);
+      pos[i * 3] = rand(-12, 12);
+      pos[i * 3 + 1] = rand(-3, 9);
+      pos[i * 3 + 2] = rand(-10, 6);
+      this.pColorGroup[i] = Math.random() < 0.5 ? 0 : 1;
+      const c = this.pColorGroup[i] === 0 ? this.green : this.orange;
+      col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b;
+      this.pSpeed[i] = rand(0.2, 0.9);
+    }
+    const pg = new THREE.BufferGeometry();
+    pg.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    pg.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    this.pMat = new THREE.PointsMaterial({
+      size: 0.12, map: this.dot, vertexColors: true, depthWrite: false,
+      blending: THREE.AdditiveBlending, sizeAttenuation: true,
+    });
+    this.particles = new THREE.Points(pg, this.pMat);
+    this.particles.frustumCulled = false;
+    this.particles.renderOrder = 6;
+    this.group.add(this.particles);
+    this.fade(this.pMat, 0.9);
+
+    this.rings = new RingPool(this, FLOOR_Y + 0.02);
+  }
+
+  onBeat(s) {
+    this.flip = !this.flip;
+    this.rings.spawn(s, this.flip ? this.green : this.orange);
+  }
+  onDrop() {
+    this.boost = 1;
+    this.rings.spawn(1, this.green);
+    this.rings.spawn(1, this.orange);
+  }
+
+  lights(rig, t, a, k) {
+    rig.key.color.lerp(this.green, k);
+    rig.fill.color.lerp(this.orange, k);
+    rig.hemi.color.lerp(this.green, k);
+    rig.key.position.set(Math.sin(t * 0.9) * 6, 3, 5 + Math.cos(t * 0.9) * 2);
+    rig.fill.position.set(Math.sin(t * 0.9 + Math.PI) * 6, 2, 5 + Math.cos(t * 0.9 + Math.PI) * 2);
+    rig.key.intensity = 60 + a.bass * 260;
+    rig.fill.intensity = 60 + a.mid * 220;
+    rig.hemi.intensity = 0.25;
+    rig.dir.intensity = 0;
+  }
+
+  update(c) {
+    const { t, mt, dt, a, motionSpeed } = c;
+    this.boost *= Math.exp(-dt * 2.5);
+
+    const cycleDuration = 14;
+    const transitionDuration = 2.5;
+    const cycle = Math.floor(t / cycleDuration);
+    const paletteIndex = cycle % this.palettes.length;
+    const previousIndex = (paletteIndex + this.palettes.length - 1) % this.palettes.length;
+    const blend = cycle === 0 ? 1 : smooth((t % cycleDuration) / transitionDuration);
+    const previous = this.palettes[previousIndex];
+    const target = this.palettes[paletteIndex];
+    this.green.copy(previous.green).lerp(target.green, blend);
+    this.orange.copy(previous.orange).lerp(target.orange, blend);
+    this.video.material.uniforms.uTintGreen.value.copy(this.green);
+    this.video.material.uniforms.uTintOrange.value.copy(this.orange);
+
+    this.cam.pos.set(Math.sin(mt * 0.25) * 1.8, 0.8 + Math.sin(mt * 0.4) * 0.25, 9.5 + Math.sin(mt * 0.17) * 0.8);
+    this.cam.look.set(0, 0.2, 0);
+
+    this.video.tick(t, c.glitch, a.beatEnv, a.energy);
+
+    this.halo.material.color.copy(this.green).lerp(this.orange, 0.5 + 0.5 * Math.sin(mt * 0.6));
+    const hs = 8 + a.bass * 3 + this.boost * 3;
+    this.halo.scale.set(hs, hs, 1);
+    this.haloFade.base = 0.3 + a.bass * 0.4;
+
+    this.floorMat.uniforms.uTime.value = mt;
+    this.floorMat.uniforms.uBass.value = a.bass;
+
+    for (const b of this.beams) {
+      b.pivot.rotation.z = Math.sin(mt * b.speed + b.phase) * 0.9;
+      b.pivot.rotation.x = Math.cos(mt * b.speed * 0.8 + b.phase * 1.3) * 0.7;
+      const w = 1 + a.beatEnv * 3 + this.boost * 5;
+      b.beam.scale.set(w, 14 + a.bass * 8 + this.boost * 6, w);
+    }
+
+    this.ball.rotation.y += dt * motionSpeed * 0.5;
+    this.ballWire.rotation.copy(this.ball.rotation);
+    const bs = 1 + a.beatEnv * 0.12;
+    this.ball.scale.setScalar(bs);
+    this.ballWire.scale.setScalar(bs);
+
+    const pos = this.particles.geometry.attributes.position.array;
+    for (let i = 0; i < this.pCount; i++) {
+      let y = pos[i * 3 + 1] + this.pSpeed[i] * dt * motionSpeed * (1 + a.bass * 2.5);
+      if (y > 9) { y = -3; pos[i * 3] = rand(-12, 12); }
+      pos[i * 3 + 1] = y;
+      pos[i * 3] += Math.sin(mt * 0.7 + i) * dt * motionSpeed * 0.15;
+    }
+    this.particles.geometry.attributes.position.needsUpdate = true;
+    const colors = this.particles.geometry.attributes.color;
+    for (let i = 0; i < this.pCount; i++) {
+      const color = this.pColorGroup[i] === 0 ? this.green : this.orange;
+      colors.setXYZ(i, color.r, color.g, color.b);
+    }
+    colors.needsUpdate = true;
+    this.pMat.size = 0.1 + a.bass * 0.12 + this.boost * 0.1;
+    this.ballWire.material.color.copy(this.green);
+    for (let i = 0; i < this.beams.length; i++) {
+      this.beams[i].beam.material.color.copy(i % 2 ? this.orange : this.green);
+    }
+
+    this.rings.update(dt);
+    this.applyFade();
+  }
+}
+
+class DataScene extends BaseScene {
+  constructor() {
+    super('data');
+    this.bg.set(0x000000);
+    this.fogDensity = 0;
+    this.video = new VideoLayer(PARAMS.assets.dataVideo, PARAMS.video.featuredHeight, true, false);
+    this.video.material.depthTest = false;
+    this.video.mesh.renderOrder = 10;
+    this.group.add(this.video.mesh);
+    this.fade(this.video.material);
+
+    this.hudTexture = makeDataHudTexture();
+    this.hudMaterial = new THREE.SpriteMaterial({
+      map: this.hudTexture,
+      color: 0x9dffd0,
+      transparent: true,
+      opacity: 0.28,
+      depthTest: false,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    this.hud = new THREE.Sprite(this.hudMaterial);
+    this.hud.renderOrder = 11;
+    this.group.add(this.hud);
+    this.hudFade = this.fade(this.hudMaterial, 0.28);
+
+    this.tint = new THREE.Color(0xffffff);
+    this.tintStart = new THREE.Color(0xffffff);
+    this.tintTarget = new THREE.Color(0xffffff);
+    this.tintStrength = 0;
+    this.tintStrengthStart = 0;
+    this.tintStrengthTarget = 0;
+    this.tintElapsed = 0;
+    this.tintDelay = rand(24, 42);
+    this.tintDuration = 4;
+    this.activeTime = 0;
+    this.tintColors = [0x48bfff, 0xff5c9a, 0xb56cff, 0x43e0b1, 0xffbd52]
+      .map((color) => new THREE.Color(color));
+    this.accentColors = this.tintColors;
+  }
+
+  update(c) {
+    const { dt, t } = c;
+    this.activeTime += dt;
+    this.video.tick(t, 0, c.a.beatEnv, c.a.energy);
+
+    if (this.activeTime >= this.tintDelay) {
+      this.tintDelay = this.activeTime + rand(48, 78);
+      this.tintStart.copy(this.tint);
+      this.tintStrengthStart = this.tintStrength;
+      this.tintTarget.copy(this.tintColors[randInt(0, this.tintColors.length - 1)]);
+      this.tintStrengthTarget = 0.42;
+      this.tintElapsed = 0;
+    }
+
+    if (this.tintElapsed < this.tintDuration) {
+      this.tintElapsed = Math.min(this.tintDuration, this.tintElapsed + dt);
+      const blend = smooth(this.tintElapsed / this.tintDuration);
+      this.tint.lerpColors(this.tintStart, this.tintTarget, blend);
+      this.tintStrength = this.tintStrengthStart
+        + (this.tintStrengthTarget - this.tintStrengthStart) * blend;
+    }
+
+    this.video.material.uniforms.uTint.value.copy(this.tint);
+    this.video.material.uniforms.uTintStrength.value = this.tintStrength;
+    const flicker = Math.sin(this.activeTime * 1.6) * 0.025
+      + (this.activeTime % 23 < 0.09 ? -0.12 : 0);
+    this.hudFade.base = clamp(0.28 + flicker + c.a.beatEnv * 0.08, 0.12, 0.4);
+    this.applyFade();
+  }
+
+  fitHudToCamera(camera, center) {
+    this.group.updateWorldMatrix(true, false);
+    this.hud.position.copy(this.group.worldToLocal(center.clone()));
+    const distance = camera.position.distanceTo(center);
+    const viewHeight = 2 * distance * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2);
+    const viewWidth = viewHeight * camera.aspect;
+    const height = Math.max(viewHeight, viewWidth / this.video.src.aspect);
+    this.hud.scale.set(height * this.video.src.aspect, height, 1);
+  }
+}
+
+// =====================================================================
+//  ESCENA 2 — Edificios retro-futuristas blancos orbitando (anim2)
+// =====================================================================
+class MatrixScene extends BaseScene {
+  constructor() {
+    super('matrix');
+    const C = PARAMS.colors.matrix;
+    this.bg.set(C.bg);
+    this.fogDensity = 0.02;
+    this.white = new THREE.Color(C.white);
+    this.ice = new THREE.Color(C.ice);
+    this.accentColors = [this.white, this.ice];
+
+    this.video = new VideoLayer(PARAMS.assets.videos[1], PARAMS.video.featuredHeight, true);
+    this.group.add(this.video.mesh);
+    this.fade(this.video.material);
+
+    this.dot = makeDotTexture();
+    this.halo = new THREE.Sprite(
+      new THREE.SpriteMaterial({ map: this.dot, color: 0xffffff, blending: THREE.AdditiveBlending, depthWrite: false })
+    );
+    this.halo.position.set(0, 0, -0.5);
+    this.halo.scale.set(10, 10, 1);
+    this.halo.renderOrder = 2;
+    this.haloFade = this.fade(this.halo.material, 0.25);
+    this.group.add(this.halo);
+
+    // Edificios blancos (InstancedMesh) en 3 anillos concéntricos
+    const rings = [
+      { n: N(12), radius: 8.5, hMax: 3.5, speed: 0.12, wMul: 0.7 },
+      { n: N(72), radius: 11.5, hMax: 8, speed: -0.08, wMul: 1.25 },
+      { n: N(92), radius: 16.5, hMax: 12, speed: 0.05, wMul: 1.5 },
+    ];
+    this.ringDefs = rings;
+    this.inst = [];
+    rings.forEach((r, ri) => {
+      for (let k = 0; k < r.n; k++) {
+        this.inst.push({
+          ring: ri,
+          a0: (k / r.n) * Math.PI * 2 + rand(-0.03, 0.03),
+          rad: r.radius + rand(-1.1, 1.1),
+          phase: rand(0, Math.PI * 2),
+          w: rand(0.7, 1.6) * r.wMul,
+          d: rand(0.7, 1.6) * r.wMul,
+          h: rand(1.5, r.hMax),
+          bin: (k * 3 + ri * 17) % 64,
+        });
       }
-      const ps = Math.floor((pk[i] * maxH) / (seg + gap));
-      if (ps > 0) {
-        ctx.fillStyle = hsla(BASE + 40, 100, 80, 0.9);
-        ctx.fillRect(i * bw + 1, H - (ps + 1) * (seg + gap), bw - 2, 2);
+    });
+    this.facade = makeWhiteFacadeTexture();
+    this.bMat = new THREE.MeshStandardMaterial({
+      color: 0xffffff, map: this.facade, emissive: 0xffffff, emissiveIntensity: 0.15,
+      roughness: 0.55, metalness: 0, depthWrite: false,
+    });
+    this.buildingMeshes = rings.map((ring, ringIndex) => {
+      const items = this.inst.filter((building) => building.ring === ringIndex);
+      const mesh = new THREE.InstancedMesh(makeBoxGeometry(1, 1), this.bMat, items.length);
+      mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      mesh.frustumCulled = false;
+      mesh.renderOrder = 1;
+      this.group.add(mesh);
+      return { mesh, items };
+    });
+    this.fade(this.bMat, 0.72);
+    this.dummy = new THREE.Object3D();
+
+    // Lluvia digital blanca estilo "Matrix"
+    const ns = N(500);
+    this.ns = ns;
+    const rp = new Float32Array(ns * 6);
+    const rc = new Float32Array(ns * 6);
+    this.rain = [];
+    for (let i = 0; i < ns; i++) {
+      this.rain.push({ x: rand(-18, 18), y: rand(FLOOR_Y, 14), z: rand(-18, 8), speed: rand(4, 12), len: rand(0.6, 2.5) });
+      rc[i * 6] = 1; rc[i * 6 + 1] = 1; rc[i * 6 + 2] = 1; // cabeza brillante
+      rc[i * 6 + 3] = 0; rc[i * 6 + 4] = 0; rc[i * 6 + 5] = 0; // cola se apaga
+    }
+    const rg = new THREE.BufferGeometry();
+    rg.setAttribute('position', new THREE.BufferAttribute(rp, 3));
+    rg.setAttribute('color', new THREE.BufferAttribute(rc, 3));
+    this.rainMat = new THREE.LineBasicMaterial({ vertexColors: true, blending: THREE.AdditiveBlending, depthWrite: false });
+    this.rainLines = new THREE.LineSegments(rg, this.rainMat);
+    this.rainLines.frustumCulled = false;
+    this.rainLines.renderOrder = 3;
+    this.group.add(this.rainLines);
+    this.fade(this.rainMat, 0.8);
+
+    // Piso de neón sutil con líneas de perspectiva y pulso de audio
+    this.gridMat = new THREE.ShaderMaterial({
+      uniforms: {
+        uOpacity: { value: 1 },
+        uTime: { value: 0 },
+        uBass: { value: 0 },
+        uColor: { value: new THREE.Color(0x9db7c9) },
+        uAccent: { value: new THREE.Color(0xe2f4ff) },
+      },
+      vertexShader: /* glsl */ `
+        varying vec3 vWorld;
+        void main() {
+          vWorld = (modelMatrix * vec4(position, 1.0)).xyz;
+          gl_Position = projectionMatrix * viewMatrix * vec4(vWorld, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        uniform float uOpacity; uniform float uTime; uniform float uBass;
+        uniform vec3 uColor; uniform vec3 uAccent;
+        varying vec3 vWorld;
+        void main() {
+          vec2 fine = abs(fract(vWorld.xz / 2.5 + 0.5) - 0.5) / fwidth(vWorld.xz / 2.5);
+          vec2 major = abs(fract(vWorld.xz / 10.0 + 0.5) - 0.5) / fwidth(vWorld.xz / 10.0);
+          float fineLine = 1.0 - min(min(fine.x, fine.y), 1.0);
+          float majorLine = 1.0 - min(min(major.x, major.y), 1.0);
+          float fade = smoothstep(-75.0, -5.0, vWorld.z);
+          float pulse = 0.88 + 0.12 * sin(vWorld.x * 0.08 - uTime * 0.35);
+          vec3 color = mix(uColor, uAccent, majorLine * 0.55);
+          float alpha = (0.025 + fineLine * 0.16 + majorLine * 0.22) * fade * pulse * (1.0 + uBass * 0.3);
+          gl_FragColor = vec4(color, alpha * uOpacity);
+        }
+      `,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    this.grid = new THREE.Mesh(new THREE.PlaneGeometry(100, 100), this.gridMat);
+    this.grid.rotation.x = -Math.PI / 2;
+    this.grid.position.set(0, FLOOR_Y, -12);
+    this.grid.renderOrder = 0;
+    this.group.add(this.grid);
+    this.fade(this.gridMat);
+
+    this.rings = new RingPool(this, FLOOR_Y + 0.02);
+  }
+
+  onBeat(s) { this.rings.spawn(s, 0xffffff); }
+  onDrop() { this.rings.spawn(1, 0xffffff); this.rings.spawn(0.8, 0xdfe9ff); }
+
+  lights(rig, t, a, k) {
+    const white = this.white;
+    rig.key.color.lerp(white, k);
+    rig.fill.color.lerp(this.ice, k);
+    rig.hemi.color.lerp(white, k);
+    rig.key.position.set(4, 6, 8);
+    rig.fill.position.set(-6, 3, 4);
+    rig.key.intensity = 150 + a.bass * 220;
+    rig.fill.intensity = 80 + a.mid * 150;
+    rig.hemi.intensity = 0.8;
+    rig.dir.intensity = 1.1;
+  }
+
+  update(c) {
+    const { t, mt, dt, a, motionSpeed } = c;
+    const grow = smooth(this.opacity);
+
+    this.cam.pos.set(Math.sin(mt * 0.18) * 2.5, 1.4 + Math.sin(mt * 0.23) * 0.5, 10.5 + Math.cos(mt * 0.13));
+    this.cam.look.set(0, 0.8, 0);
+
+    this.video.tick(t, c.glitch, a.beatEnv, a.energy);
+    this.haloFade.base = 0.2 + a.energy * 0.35;
+    this.gridMat.uniforms.uTime.value = mt;
+    this.gridMat.uniforms.uBass.value = a.bass;
+
+    // Edificios: giran en torno al plano del video y "respiran" con el espectro
+    const d = this.dummy;
+    for (const { mesh, items } of this.buildingMeshes) {
+      for (let i = 0; i < items.length; i++) {
+        const b = items[i];
+        const R = this.ringDefs[b.ring];
+        const drift = Math.sin(mt * 0.12 + b.phase) * 0.06;
+        const ang = b.a0 + mt * (R.speed + Math.sign(R.speed) * a.mid * 0.015) + drift;
+        const breath = 0.96 + Math.sin(mt * 0.2 + b.phase) * 0.04;
+        const h = Math.max(0.01, b.h * (0.82 + a.bins[b.bin] * 0.55) * breath * grow);
+        const radius = b.rad + Math.sin(mt * 0.1 + b.phase) * 0.12;
+        d.position.set(Math.cos(ang) * radius, FLOOR_Y + h / 2, Math.sin(ang) * radius);
+        d.rotation.set(0, -ang, 0);
+        d.scale.set(b.w, h, b.d);
+        d.updateMatrix();
+        mesh.setMatrixAt(i, d.matrix);
+      }
+      mesh.instanceMatrix.needsUpdate = true;
+    }
+    this.bMat.emissiveIntensity = 0.12 + a.energy * 0.4 + a.beatEnv * 0.3;
+
+    // Lluvia
+    const rp = this.rainLines.geometry.attributes.position.array;
+    const spd = 1 + a.energy * 2;
+    for (let i = 0; i < this.ns; i++) {
+      const r = this.rain[i];
+      r.y -= r.speed * dt * motionSpeed * spd;
+      if (r.y < FLOOR_Y) { r.y = 14; r.x = rand(-18, 18); r.z = rand(-18, 8); }
+      rp[i * 6] = r.x; rp[i * 6 + 1] = r.y; rp[i * 6 + 2] = r.z;
+      rp[i * 6 + 3] = r.x; rp[i * 6 + 4] = r.y + r.len; rp[i * 6 + 5] = r.z;
+    }
+    this.rainLines.geometry.attributes.position.needsUpdate = true;
+
+    this.group.rotation.z = Math.sin(mt * 0.2) * 0.03;
+    this.rings.update(dt);
+    this.applyFade();
+  }
+}
+
+// =====================================================================
+//  Cometa / estrella fugaz (cabeza + estela hecha de puntos)
+// =====================================================================
+class Comet {
+  constructor(owner, parent) {
+    this.N = 44;
+    const gp = createGlowPoints(this.N, { twinkle: 0 });
+    this.points = gp.points;
+    this.geo = gp.geometry;
+    owner.fade(gp.material, 1);
+    this.points.visible = false;
+    this.points.renderOrder = 6;
+    parent.add(this.points);
+    this.pos = new THREE.Vector3();
+    this.vel = new THREE.Vector3();
+    this.hist = Array.from({ length: this.N }, () => new THREE.Vector3());
+    this.color = new THREE.Color();
+    this.active = false;
+    this.life = 0;
+    this.maxLife = 2;
+    this.power = 1;
+  }
+  spawn(power, hex) {
+    const r = 220;
+    const az = deg(rand(-55, 55));
+    const el = deg(rand(22, 58));
+    this.pos.set(r * Math.cos(el) * Math.sin(az), r * Math.sin(el), -r * Math.cos(el) * Math.cos(az));
+    const dir = new THREE.Vector3((Math.random() < 0.5 ? -1 : 1) * rand(0.7, 1), -rand(0.25, 0.6), rand(-0.1, 0.1)).normalize();
+    this.vel.copy(dir).multiplyScalar(rand(130, 210));
+    this.maxLife = rand(1.5, 2.4);
+    this.life = 0;
+    this.power = power;
+    this.color.set(hex);
+    for (const h of this.hist) h.copy(this.pos);
+    this.active = true;
+    this.points.visible = true;
+  }
+  update(dt) {
+    if (!this.active) return;
+    this.life += dt;
+    if (this.life >= this.maxLife) {
+      this.active = false;
+      this.points.visible = false;
+      return;
+    }
+    this.pos.addScaledVector(this.vel, dt);
+    for (let i = this.N - 1; i > 0; i--) this.hist[i].copy(this.hist[i - 1]);
+    this.hist[0].copy(this.pos);
+
+    const p = this.life / this.maxLife;
+    const env = Math.min(1, this.life / 0.15) * Math.min(1, (1 - p) / 0.35);
+    const P = this.geo.attributes.position.array;
+    const C = this.geo.attributes.aColor.array;
+    const S = this.geo.attributes.aSize.array;
+    for (let i = 0; i < this.N; i++) {
+      const h = this.hist[i];
+      P[i * 3] = h.x; P[i * 3 + 1] = h.y; P[i * 3 + 2] = h.z;
+      const k = 1 - i / (this.N - 1);
+      const f = k * k * env * this.power;
+      C[i * 3] = this.color.r * f; C[i * 3 + 1] = this.color.g * f; C[i * 3 + 2] = this.color.b * f;
+      S[i] = 2 + (i === 0 ? 26 : 20 * k) * this.power;
+    }
+    this.geo.attributes.position.needsUpdate = true;
+    this.geo.attributes.aColor.needsUpdate = true;
+    this.geo.attributes.aSize.needsUpdate = true;
+  }
+}
+
+// =====================================================================
+//  ESCENA 3 — Ciudad retro sci-fi + cielo inmenso (anim3)
+// =====================================================================
+class CityScene extends BaseScene {
+  constructor() {
+    super('city');
+    const C = PARAMS.colors.city;
+    this.C = C;
+    this.bg.set(C.bg);
+    this.fogDensity = 0.004;
+    this.neonA = new THREE.Color(C.neonA);
+    this.neonB = new THREE.Color(C.neonB);
+    this.accentColors = [this.neonA, this.neonB, new THREE.Color(C.amber)];
+    this.spawnQueue = [];
+    this.idle = rand(2, 4);
+    this.nodeBoost = 0;
+
+    this.video = new VideoLayer(PARAMS.assets.videos[2], PARAMS.video.featuredHeight, true);
+    this.video.material.depthTest = false;
+    this.group.add(this.video.mesh);
+    this.fade(this.video.material);
+
+    // ---- Cielo (gradiente + nebulosa + resplandor de horizonte) ----
+    this.skyMat = new THREE.ShaderMaterial({
+      uniforms: {
+        uOpacity: { value: 1 }, uTime: { value: 0 }, uBass: { value: 0 },
+        uTop: { value: new THREE.Color(C.skyTop) },
+        uMid: { value: new THREE.Color(C.skyMid) },
+        uHor: { value: new THREE.Color(C.skyHorizon) },
+      },
+      vertexShader: /* glsl */ `
+        varying vec3 vDir;
+        void main() {
+          vDir = normalize(position);
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        uniform float uOpacity; uniform float uTime; uniform float uBass;
+        uniform vec3 uTop; uniform vec3 uMid; uniform vec3 uHor;
+        varying vec3 vDir;
+        void main() {
+          float h = clamp(vDir.y, 0.0, 1.0);
+          vec3 col = mix(uHor, uMid, smoothstep(0.0, 0.28, h));
+          col = mix(col, uTop, smoothstep(0.2, 0.9, h));
+          col += uHor * exp(-abs(vDir.y) * 6.0) * (0.25 + uBass * 0.6);
+          float n = sin(vDir.x * 6.0 + uTime * 0.05) * sin(vDir.z * 5.0 - uTime * 0.04) * sin(vDir.y * 9.0);
+          col += vec3(0.06, 0.42, 0.12) * max(n, 0.0) * 0.35 * smoothstep(0.05, 0.5, h);
+          gl_FragColor = vec4(col, uOpacity);
+        }
+      `,
+      side: THREE.BackSide,
+      transparent: true,
+      depthWrite: false,
+    });
+    const sky = new THREE.Mesh(new THREE.SphereGeometry(300, 48, 32), this.skyMat);
+    sky.renderOrder = -10;
+    this.group.add(sky);
+    this.fade(this.skyMat);
+
+    this.skyGroup = new THREE.Group();
+    this.group.add(this.skyGroup);
+
+    // ---- Estrellas ----
+    const ns = N(2600);
+    const stars = createGlowPoints(ns, { twinkle: 0.6 });
+    this.starMat = stars.material;
+    {
+      const P = stars.geometry.attributes.position.array;
+      const Cc = stars.geometry.attributes.aColor.array;
+      const S = stars.geometry.attributes.aSize.array;
+      const Ph = stars.geometry.attributes.aPhase.array;
+      const starColor = new THREE.Color(C.star);
+      for (let i = 0; i < ns; i++) {
+        let v;
+        do { v = new THREE.Vector3(rand(-1, 1), rand(0, 1), rand(-1, 1)); } while (v.lengthSq() > 1 || v.lengthSq() < 0.01 || v.y / v.length() < 0.02);
+        v.normalize().multiplyScalar(250);
+        P[i * 3] = v.x; P[i * 3 + 1] = v.y; P[i * 3 + 2] = v.z;
+        const b = rand(0.5, 1);
+        Cc[i * 3] = starColor.r * b; Cc[i * 3 + 1] = starColor.g * b; Cc[i * 3 + 2] = starColor.b * b;
+        S[i] = Math.random() < 0.06 ? rand(5, 8) : rand(1.5, 3.5);
+        Ph[i] = Math.random();
       }
     }
-    ctx.globalCompositeOperation = 'source-over';
+    stars.points.renderOrder = -5;
+    this.skyGroup.add(stars.points);
+    this.fade(stars.material, 1);
+
+    // ---- Constelaciones generadas por código ----
+    this.buildConstellations();
+
+    // ---- Cometas / estrellas fugaces ----
+    this.comets = [];
+    for (let i = 0; i < 8; i++) this.comets.push(new Comet(this, this.group));
+
+    // ---- Sol retro con franjas ----
+    this.sunMat = new THREE.ShaderMaterial({
+      uniforms: { uOpacity: { value: 1 }, uTime: { value: 0 }, uBass: { value: 0 } },
+      vertexShader: /* glsl */ `
+        varying vec2 vUv;
+        void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }
+      `,
+      fragmentShader: /* glsl */ `
+        uniform float uOpacity; uniform float uTime; uniform float uBass;
+        varying vec2 vUv;
+        void main() {
+          float y = vUv.y;
+          vec3 top = vec3(0.35, 1.0, 0.32);
+          vec3 bot = vec3(0.0, 0.35, 0.14);
+          vec3 col = mix(bot, top, y) * (0.9 + uBass * 0.6);
+          float stripe = step(0.5, fract(y * 14.0 - uTime * 0.15));
+          float cut = smoothstep(0.55, 0.35, y);
+          float a = mix(1.0, stripe, cut);
+          gl_FragColor = vec4(col, a * uOpacity);
+        }
+      `,
+      transparent: true,
+      depthWrite: false,
+    });
+    const sun = new THREE.Mesh(new THREE.CircleGeometry(38, 64), this.sunMat);
+    sun.position.set(0, 14, -190);
+    sun.renderOrder = -3;
+    this.group.add(sun);
+    this.fade(this.sunMat);
+
+    // ---- Suelo retro: cuadrícula que avanza hacia la cámara ----
+    this.gridMat = new THREE.ShaderMaterial({
+      uniforms: {
+        uOpacity: { value: 1 }, uTime: { value: 0 }, uBass: { value: 0 },
+        uColor: { value: new THREE.Color(C.grid) },
+        uColor2: { value: new THREE.Color(C.neonA) },
+      },
+      vertexShader: /* glsl */ `
+        varying vec2 vUv; varying vec3 vWorld;
+        void main() {
+          vUv = uv;
+          vWorld = (modelMatrix * vec4(position, 1.0)).xyz;
+          gl_Position = projectionMatrix * viewMatrix * vec4(vWorld, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        uniform float uOpacity; uniform float uTime; uniform float uBass;
+        uniform vec3 uColor; uniform vec3 uColor2;
+        varying vec2 vUv; varying vec3 vWorld;
+        void main() {
+          vec2 p = vUv * 400.0;
+          p.y += uTime * 8.0;
+          vec2 q = p / 4.0;
+          vec2 g = abs(fract(q - 0.5) - 0.5) / fwidth(q);
+          float line = 1.0 - min(min(g.x, g.y), 1.0);
+          float fadeFar = smoothstep(-280.0, -30.0, vWorld.z);
+          vec3 col = mix(uColor, uColor2, step(0.5, fract(q.x / 6.0)));
+          float glow = 0.55 + uBass * 0.9;
+          gl_FragColor = vec4(col * glow, line * fadeFar * uOpacity);
+        }
+      `,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(400, 400), this.gridMat);
+    ground.rotation.x = -Math.PI / 2;
+    ground.position.set(0, FLOOR_Y, -100);
+    ground.renderOrder = -2;
+    this.group.add(ground);
+    this.fade(this.gridMat);
+
+    // ---- Ciudad retro sci-fi (edificios agrupados por altura) ----
+    this.buildCity();
   }
 
-  // ---------- postproceso ----------
-  function post(t) {
-    const cw = canvas.width;
-    const ch = canvas.height;
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.globalAlpha = 1;
-    ctx.globalCompositeOperation = 'source-over';
-
-    // bloom barato: reducir la imagen y volver a sumarla ampliada
-    if (params.bloom > 0.01 && bloomA && bloomB) {
-      const a = bloomA.getContext('2d');
-      const b = bloomB.getContext('2d');
-      a.imageSmoothingQuality = 'high';
-      b.imageSmoothingQuality = 'high';
-      a.drawImage(canvas, 0, 0, cw, ch, 0, 0, bloomA.width, bloomA.height);
-      b.drawImage(bloomA, 0, 0, bloomA.width, bloomA.height, 0, 0, bloomB.width, bloomB.height);
-      ctx.imageSmoothingEnabled = true;
-      ctx.globalCompositeOperation = 'lighter';
-      ctx.globalAlpha = clamp(params.bloom * 0.55 * (0.8 + levels.beat * 0.6), 0, 1);
-      ctx.drawImage(bloomB, 0, 0, bloomB.width, bloomB.height, 0, 0, cw, ch);
-      ctx.globalAlpha = clamp(params.bloom * 0.3, 0, 1);
-      ctx.drawImage(bloomA, 0, 0, bloomA.width, bloomA.height, 0, 0, cw, ch);
-      ctx.globalAlpha = 1;
-      ctx.globalCompositeOperation = 'source-over';
-    }
-
-    // glitch: franjas desplazadas + eco, solo con el beat
-    const gl = params.glitch * levels.beat;
-    if (gl > 0.06) {
-      const strips = 2 + Math.floor(gl * 4);
-      for (let k = 0; k < strips; k++) {
-        const sy = Math.floor(rand(0, Math.max(1, ch - 60)));
-        const sh = Math.floor(rand(6, 40) * dpr);
-        const dx = Math.round(rand(-1, 1) * 50 * gl * dpr);
-        ctx.drawImage(canvas, 0, sy, cw, sh, dx, sy, cw, sh);
+  buildConstellations() {
+    const R = 240;
+    const linePos = [];
+    const nodePos = [];
+    const up = new THREE.Vector3(0, 1, 0);
+    for (let c = 0; c < 8; c++) {
+      const az = deg(lerp(-52, 52, c / 7) + rand(-5, 5));
+      const el = deg(rand(12, 50));
+      const center = new THREE.Vector3(Math.cos(el) * Math.sin(az), Math.sin(el), -Math.cos(el) * Math.cos(az)).multiplyScalar(R);
+      const nrm = center.clone().normalize();
+      const u = new THREE.Vector3().crossVectors(up, nrm).normalize();
+      const v = new THREE.Vector3().crossVectors(nrm, u).normalize();
+      const k = randInt(6, 9);
+      const pts = [];
+      let cx = 0, cy = 0;
+      for (let j = 0; j < k; j++) {
+        cx += rand(-16, 16);
+        cy += rand(-12, 12);
+        pts.push(center.clone().addScaledVector(u, cx).addScaledVector(v, cy).normalize().multiplyScalar(R));
       }
-      ctx.globalCompositeOperation = 'lighter';
-      ctx.globalAlpha = 0.18 * gl;
-      ctx.drawImage(canvas, Math.round(4 * dpr * gl), 0);
-      ctx.globalAlpha = 1;
-      ctx.globalCompositeOperation = 'source-over';
+      for (let j = 0; j < k - 1; j++) {
+        linePos.push(pts[j].x, pts[j].y, pts[j].z, pts[j + 1].x, pts[j + 1].y, pts[j + 1].z);
+      }
+      if (Math.random() < 0.6 && k > 4) {
+        const j = randInt(0, k - 3);
+        linePos.push(pts[j].x, pts[j].y, pts[j].z, pts[j + 2].x, pts[j + 2].y, pts[j + 2].z);
+      }
+      for (const p of pts) nodePos.push(p.x, p.y, p.z);
     }
-    // flash suave de pantalla en cada golpe
-    if (levels.beat > 0.02) {
-      ctx.globalCompositeOperation = 'lighter';
-      ctx.fillStyle = hsla(BASE, 100, 50, levels.beat * 0.06);
-      ctx.fillRect(0, 0, cw, ch);
-      ctx.globalCompositeOperation = 'source-over';
+
+    const lg = new THREE.BufferGeometry();
+    lg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(linePos), 3));
+    this.constMat = new THREE.LineBasicMaterial({
+      color: 0x7dff9b, blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
+    });
+    const lines = new THREE.LineSegments(lg, this.constMat);
+    lines.frustumCulled = false;
+    lines.renderOrder = -4;
+    this.skyGroup.add(lines);
+    this.constFade = this.fade(this.constMat, 0.4);
+
+    const nCount = nodePos.length / 3;
+    const nodes = createGlowPoints(nCount, { twinkle: 0.5 });
+    this.nodeGeo = nodes.geometry;
+    this.nodeBase = new Float32Array(nCount);
+    {
+      const P = nodes.geometry.attributes.position.array;
+      const Cc = nodes.geometry.attributes.aColor.array;
+      const S = nodes.geometry.attributes.aSize.array;
+      const Ph = nodes.geometry.attributes.aPhase.array;
+      for (let i = 0; i < nCount; i++) {
+        P[i * 3] = nodePos[i * 3]; P[i * 3 + 1] = nodePos[i * 3 + 1]; P[i * 3 + 2] = nodePos[i * 3 + 2];
+        Cc[i * 3] = 0.45; Cc[i * 3 + 1] = 1.0; Cc[i * 3 + 2] = 0.58;
+        this.nodeBase[i] = rand(6, 11);
+        S[i] = this.nodeBase[i];
+        Ph[i] = Math.random();
+      }
     }
-    // parpadeo CRT ocasional
-    if (Math.random() < 0.03 * params.glitch) {
-      ctx.fillStyle = 'rgba(0,0,0,0.12)';
-      ctx.fillRect(0, 0, cw, ch);
+    nodes.points.renderOrder = -4;
+    this.nodeMat = nodes.material;
+    this.skyGroup.add(nodes.points);
+    this.fade(nodes.material, 1);
+  }
+
+  buildCity() {
+    const C = this.C;
+    const palette = ['#39ff14', '#00e676', '#a6ff00', '#00c853'];
+    this.cityTex = makeNeonWindowsTexture(palette);
+    this.cityMat = new THREE.MeshStandardMaterial({
+      color: 0xffffff, emissive: 0xffffff, emissiveMap: this.cityTex, emissiveIntensity: 0.7,
+      roughness: 0.85, metalness: 0.1,
+    });
+    this.fade(this.cityMat);
+
+    const buckets = [8, 14, 22, 34, 52, 70].map((h) => ({ h, items: [] }));
+    const total = N(260);
+    for (let i = 0; i < total; i++) {
+      const x = rand(-130, 130);
+      let bi = Math.min(buckets.length - 1, Math.floor(Math.pow(Math.random(), 1.7) * buckets.length));
+      if (Math.abs(x) < 30) bi = Math.min(bi, 2); // no tapar la zona central del cielo
+      buckets[bi].items.push({
+        x, z: rand(-120, -30),
+        w: bi >= 4 ? rand(2.5, 4) : rand(3, 9),
+        d: rand(3, 8),
+        hMul: rand(0.88, 1.12),
+      });
     }
-    if (vignette) ctx.drawImage(vignette, 0, 0);
-    if (params.scanlines > 0.01 && scanPattern) {
-      ctx.globalAlpha = clamp(params.scanlines * 0.55, 0, 1);
-      ctx.fillStyle = scanPattern;
-      ctx.fillRect(0, 0, cw, ch);
-      // barra que baja lentamente (refresco de pantalla)
-      const by = (mod(t * 0.08, 1.3) - 0.15) * ch;
-      const bar = ctx.createLinearGradient(0, by, 0, by + ch * 0.12);
-      bar.addColorStop(0, hsla(BASE, 100, 60, 0));
-      bar.addColorStop(0.5, hsla(BASE, 100, 60, 0.05 * params.scanlines));
-      bar.addColorStop(1, hsla(BASE, 100, 60, 0));
-      ctx.globalAlpha = 1;
-      ctx.globalCompositeOperation = 'lighter';
-      ctx.fillStyle = bar;
-      ctx.fillRect(0, by, cw, ch * 0.12);
-      ctx.globalCompositeOperation = 'source-over';
-    }
-    ctx.globalAlpha = 1;
-  }
 
-  // ---------- tamaño y recursos dependientes del tamaño ----------
-  function buildStatic() {
-    const cw = canvas.width;
-    const ch = canvas.height;
-    bloomA = document.createElement('canvas');
-    bloomA.width = Math.max(2, Math.ceil(cw / 4));
-    bloomA.height = Math.max(2, Math.ceil(ch / 4));
-    bloomB = document.createElement('canvas');
-    bloomB.width = Math.max(2, Math.ceil(cw / 12));
-    bloomB.height = Math.max(2, Math.ceil(ch / 12));
-
-    vignette = document.createElement('canvas');
-    vignette.width = cw;
-    vignette.height = ch;
-    const v = vignette.getContext('2d');
-    const rg = v.createRadialGradient(cw / 2, ch / 2, Math.min(cw, ch) * 0.35, cw / 2, ch / 2, Math.hypot(cw, ch) * 0.6);
-    rg.addColorStop(0, 'rgba(0,0,0,0)');
-    rg.addColorStop(1, 'rgba(0,0,0,0.78)');
-    v.fillStyle = rg;
-    v.fillRect(0, 0, cw, ch);
-
-    const ph = Math.max(3, Math.round(3 * dpr));
-    const sp = document.createElement('canvas');
-    sp.width = 1;
-    sp.height = ph;
-    const s = sp.getContext('2d');
-    s.fillStyle = 'rgba(0,0,0,1)';
-    s.fillRect(0, 0, 1, Math.max(1, Math.round(dpr)));
-    scanPattern = ctx.createPattern(sp, 'repeat');
-
-    buildSun();
-  }
-
-  function resize() {
-    W = Math.max(320, window.innerWidth);
-    H = Math.max(240, window.innerHeight);
-    dpr = Math.min(window.devicePixelRatio || 1, 2);
-    canvas.width = Math.floor(W * dpr);
-    canvas.height = Math.floor(H * dpr);
-    canvas.style.width = `${W}px`;
-    canvas.style.height = `${H}px`;
-    buildStatic();
-    buildRain();
-    buildCity();
-  }
-
-  function onWindowResize() {
-    clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(resize, 150);
-  }
-
-  function regenerateCity() { buildCity(); }
-
-  // ---------- bucle principal ----------
-  function render(t, dt) {
-    const cw = canvas.width;
-    const ch = canvas.height;
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.globalAlpha = 1;
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, cw, ch);
-
-    const sh = levels.beat * params.shake * 6;
-    ctx.setTransform(dpr, 0, 0, dpr, (Math.random() - 0.5) * sh * dpr, (Math.random() - 0.5) * sh * dpr);
-
-    drawSky();
-    if (params.showSun) drawSun();
-    if (params.showRain) drawRain();
-    drawFloor(dt);
-    if (params.showCity) drawCity(t);
-    if (params.showLasers) drawLasers(t);
-    if (params.showBars) drawBars(dt);
-    post(t);
-  }
-
-  function frame(now) {
-    if (!running) return;
-    raf = requestAnimationFrame(frame);
-    const dt = Math.min(0.05, (now - last) / 1000 || 0.016);
-    last = now;
-    time += dt;
-
-    analyse(dt, time);
-    updateCity(dt);
-    updateRain(dt);
-
-    if (params.hue !== appliedHue) {
-      canvas.style.filter = params.hue ? `hue-rotate(${params.hue}deg)` : '';
-      appliedHue = params.hue;
-    }
-    render(time, dt);
-    if (onFrame) onFrame(levels);
-  }
-
-  function start() {
-    if (running) return;
-    running = true;
-    last = performance.now();
-    raf = requestAnimationFrame(frame);
-  }
-  function stop() {
-    running = false;
-    cancelAnimationFrame(raf);
-  }
-
-  // ---------- API pública ----------
-  function setParam(key, value) {
-    if (!(key in params)) return;
-    params[key] = value;
-    if (key === 'volume' && gainNode) gainNode.gain.value = value;
-    if (regenKeys.includes(key)) {
-      clearTimeout(regenTimer);
-      regenTimer = setTimeout(regenerateCity, 200);
+    const base = new THREE.Color(C.building);
+    const tmp = new THREE.Color();
+    const dummy = new THREE.Object3D();
+    this.cityMeshes = [];
+    for (const b of buckets) {
+      if (!b.items.length) continue;
+      const geo = makeBoxGeometry(1, b.h / 12);
+      const mesh = new THREE.InstancedMesh(geo, this.cityMat, b.items.length);
+      b.items.forEach((it, i) => {
+        const h = b.h * it.hMul;
+        dummy.position.set(it.x, FLOOR_Y + h / 2, it.z);
+        dummy.rotation.set(0, 0, 0);
+        dummy.scale.set(it.w, h, it.d);
+        dummy.updateMatrix();
+        mesh.setMatrixAt(i, dummy.matrix);
+        tmp.copy(base).offsetHSL(rand(-0.03, 0.05), 0, rand(-0.02, 0.05));
+        mesh.setColorAt(i, tmp);
+      });
+      mesh.instanceMatrix.needsUpdate = true;
+      mesh.instanceColor.needsUpdate = true;
+      mesh.frustumCulled = false;
+      mesh.renderOrder = -1;
+      this.group.add(mesh);
+      this.cityMeshes.push(mesh);
     }
   }
 
-  function applyPreset(preset) {
-    Object.assign(params, defaultParams, preset || {});
-    if (gainNode) gainNode.gain.value = params.volume;
-    regenerateCity();
+  spawnComets(count, power = 1) {
+    for (let i = 0; i < count; i++) this.spawnQueue.push({ delay: i * 0.12, power });
+  }
+  spawnOne(power) {
+    const c = this.comets.find((x) => !x.active);
+    if (!c) return;
+    const list = this.C.comets;
+    c.spawn(power, list[randInt(0, list.length - 1)]);
   }
 
-  function resetParams() { applyPreset({}); }
-
-  function nextPattern() { pattern = (pattern + 1) % 4; }
-
-  function destroy() {
-    stop();
-    window.removeEventListener('resize', onWindowResize);
-    clearTimeout(regenTimer);
-    clearTimeout(resizeTimer);
-    audio.pause();
-    if (actx && actx.close) actx.close();
+  onBeat(strength) {
+    this.nodeBoost = Math.max(this.nodeBoost, 0.2 + strength * 0.25);
+  }
+  onPeak() { this.spawnComets(1, 0.8); }
+  onDrop(s) {
+    this.nodeBoost = 1;
+    this.spawnComets(randInt(4, 6), 1.1);
   }
 
-  window.addEventListener('resize', onWindowResize);
-  resize();
+  lights(rig, t, a, k) {
+    rig.key.color.lerp(this.neonB, k);
+    rig.fill.color.lerp(this.neonA, k);
+    rig.hemi.color.lerp(new THREE.Color(0x38ff72), k);
+    rig.key.position.set(-6, 3, 6);
+    rig.fill.position.set(6, 2, 6);
+    rig.key.intensity = 90 + a.bass * 200;
+    rig.fill.intensity = 90 + a.mid * 180;
+    rig.hemi.intensity = 0.5;
+    rig.dir.intensity = 0.35;
+  }
+
+  update(c) {
+    const { t, mt, dt, a } = c;
+    this.nodeBoost *= Math.exp(-dt * 1.8);
+
+    this.cam.pos.set(Math.sin(mt * 0.12) * 2, 0.8 + Math.sin(mt * 0.2) * 0.3, 9);
+    this.cam.look.set(0, 3.2 + Math.sin(mt * 0.1) * 0.6, -40);
+
+    this.video.tick(t, c.glitch, a.beatEnv);
+
+    this.skyMat.uniforms.uTime.value = mt;
+    this.skyMat.uniforms.uBass.value = a.bass;
+    this.starMat.uniforms.uTime.value = mt;
+    this.nodeMat.uniforms.uTime.value = mt;
+    this.sunMat.uniforms.uTime.value = mt;
+    this.sunMat.uniforms.uBass.value = a.bass;
+    this.gridMat.uniforms.uTime.value = mt;
+    this.gridMat.uniforms.uBass.value = a.bass;
+
+    // Constelaciones: respiran con los agudos y destellan en los drops
+    this.constFade.base = 0.3 + a.high * 0.5 + this.nodeBoost * 0.4;
+    const S = this.nodeGeo.attributes.aSize.array;
+    for (let i = 0; i < S.length; i++) S[i] = this.nodeBase[i] * (1 + a.high * 0.6 + this.nodeBoost * 1.2);
+    this.nodeGeo.attributes.aSize.needsUpdate = true;
+    this.skyGroup.rotation.y = Math.sin(mt * 0.04) * 0.12;
+    this.skyGroup.rotation.x = Math.sin(mt * 0.03) * 0.03;
+
+    this.cityMat.emissiveIntensity = 0.55 + a.energy * 0.6 + a.beatEnv * 0.4;
+
+    // Cometas
+    for (let i = this.spawnQueue.length - 1; i >= 0; i--) {
+      const q = this.spawnQueue[i];
+      q.delay -= dt * c.motionSpeed;
+      if (q.delay <= 0) { this.spawnOne(q.power); this.spawnQueue.splice(i, 1); }
+    }
+    this.idle -= dt * c.motionSpeed;
+    if (this.idle <= 0) { this.idle = rand(5, 9); this.spawnOne(0.7); }
+    for (const cm of this.comets) cm.update(dt * c.motionSpeed);
+
+    this.applyFade();
+  }
+}
+
+// =====================================================================
+//  Postproceso: render a textura + pase con glitches
+// =====================================================================
+function createPost(renderer) {
+  const hdr = renderer.extensions.has('EXT_color_buffer_float') || renderer.extensions.has('EXT_color_buffer_half_float');
+  const rt = new THREE.WebGLRenderTarget(4, 4, {
+    type: hdr ? THREE.HalfFloatType : THREE.UnsignedByteType,
+    samples: MOBILE ? 2 : 4,
+  });
+
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      tDiffuse: { value: rt.texture },
+      uTime: { value: 0 },
+      uRes: { value: new THREE.Vector2(1, 1) },
+      uRgb: { value: 0 },
+      uSlice: { value: 0 },
+      uWarp: { value: 0 },
+      uFlash: { value: 0 },
+      uFlashColor: { value: new THREE.Color(1, 1, 1) },
+      uPixel: { value: 0 },
+      uInvert: { value: 0 },
+      uNoise: { value: 0.02 },
+      uVignette: { value: 0.45 },
+    },
+    vertexShader: /* glsl */ `
+      varying vec2 vUv;
+      void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }
+    `,
+    fragmentShader: /* glsl */ `
+      uniform sampler2D tDiffuse;
+      uniform float uTime; uniform vec2 uRes;
+      uniform float uRgb; uniform float uSlice; uniform float uWarp;
+      uniform float uFlash; uniform vec3 uFlashColor;
+      uniform float uPixel; uniform float uInvert;
+      uniform float uNoise; uniform float uVignette;
+      varying vec2 vUv;
+
+      float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+
+      void main() {
+        vec2 uv = vUv;
+        vec2 c = uv - 0.5;
+
+        // Distorsión de lente + ondulación (salto hiperespacial)
+        uv += c * dot(c, c) * uWarp * 1.5;
+        uv.x += sin(uv.y * 20.0 + uTime * 10.0) * 0.01 * uWarp;
+
+        // Tiras horizontales desplazadas (señal interferida)
+        float row = floor(uv.y * 18.0);
+        float tk = floor(uTime * 20.0);
+        float on = step(0.82, hash(vec2(row, tk)));
+        uv.x += (hash(vec2(row, tk + 3.0)) - 0.5) * 0.25 * uSlice * on;
+
+        // Mosaico (datos corruptos)
+        if (uPixel > 0.0) {
+          vec2 g = uRes / uPixel;
+          uv = floor(uv * g) / g + 0.5 / g;
+        }
+        uv = clamp(uv, 0.001, 0.999);
+
+        // Aberración cromática
+        vec2 off = vec2(uRgb, 0.0) * (0.6 + c.x * 0.8);
+        vec3 col;
+        col.r = texture2D(tDiffuse, uv + off).r;
+        col.g = texture2D(tDiffuse, uv).g;
+        col.b = texture2D(tDiffuse, uv - off).b;
+
+        // Scanlines, ruido, negativo, destello, viñeta
+        col *= 1.0 - 0.05 * sin(vUv.y * uRes.y * 1.5);
+        col += (hash(uv * uRes + uTime) - 0.5) * uNoise;
+        col = mix(col, vec3(1.0) - col, uInvert);
+        col = mix(col, uFlashColor, uFlash);
+        col *= 1.0 - uVignette * smoothstep(0.35, 0.95, length(c) * 1.4);
+
+        gl_FragColor = vec4(max(col, 0.0), 1.0);
+        #include <colorspace_fragment>
+      }
+    `,
+    depthTest: false,
+    depthWrite: false,
+  });
+
+  const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
+  quad.frustumCulled = false;
+  const scn = new THREE.Scene();
+  scn.add(quad);
+  const cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
   return {
-    params,
-    audio,
-    start,
-    stop,
-    resize,
-    destroy,
-    play,
-    pause,
-    toggle,
-    setParam,
-    applyPreset,
-    resetParams,
-    regenerateCity,
-    nextPattern,
-    getLevels: () => levels,
-    isPlaying: () => playing,
+    setSize(w, h) {
+      rt.setSize(w, h);
+      mat.uniforms.uRes.value.set(w, h);
+    },
+    render(renderer, scene, camera, v, time) {
+      const u = mat.uniforms;
+      u.uTime.value = time;
+      u.uRgb.value = v.rgb;
+      u.uSlice.value = v.slice;
+      u.uWarp.value = v.warp;
+      u.uFlash.value = v.flash;
+      u.uFlashColor.value.copy(v.flashColor);
+      u.uPixel.value = v.pixel * SHARED.px.value;
+      u.uInvert.value = v.invert;
+      u.uNoise.value = v.noise;
+      renderer.setRenderTarget(rt);
+      renderer.render(scene, camera);
+      renderer.setRenderTarget(null);
+      renderer.render(scn, cam);
+    },
   };
+}
+
+// =====================================================================
+//  Director de glitches: aleatorios + beats + drops + cues + transiciones
+// =====================================================================
+const FX_DURATION = { rgb: 0.3, signal: 0.4, warp: 0.7, flash: 0.35, pixel: 0.2, invert: 0.1, shake: 0.5, zoom: 0.45 };
+
+class GlitchDirector {
+  constructor() {
+    this.fx = [];
+    this.next = rand(...PARAMS.glitch.randomInterval);
+    this.cues = [...PARAMS.glitch.cues].sort((a, b) => a.at - b.at);
+    this.lastSong = 0;
+    this.v = {
+      rgb: 0, slice: 0, warp: 0, flash: 0, flashColor: new THREE.Color(1, 1, 1),
+      pixel: 0, invert: 0, noise: 0.02, shake: 0, fov: 0, roll: 0, video: 0,
+    };
+  }
+
+  trigger(type, amp = 1, color = null, dur = null) {
+    this.fx.push({ type, amp, t: 0, dur: dur || FX_DURATION[type] || 0.4, color: color ? color.clone() : null });
+    if (this.fx.length > 24) this.fx.shift();
+  }
+
+  pick() {
+    const w = PARAMS.glitch.weights;
+    const keys = Object.keys(w);
+    let sum = 0;
+    for (const k of keys) sum += w[k];
+    let r = Math.random() * sum;
+    for (const k of keys) { r -= w[k]; if (r <= 0) return k; }
+    return keys[0];
+  }
+
+  onBeat(strength, accent) {
+    if (strength > 0.6 && Math.random() < PARAMS.glitch.beatChance) this.trigger('rgb', 0.6, accent);
+  }
+  onDrop(accent) {
+    this.trigger('flash', 1, accent);
+    this.trigger('warp', 1, accent);
+    this.trigger('signal', 0.8, accent);
+    this.trigger('shake', 1, accent);
+  }
+  onTransition(accent) {
+    this.trigger('warp', 1, accent);
+    this.trigger('signal', 1, accent);
+    this.trigger('flash', 0.8, accent, 0.5);
+  }
+
+  update(dt, a, songTime, accent) {
+    // Cues anclados a la canción (se ignoran si el usuario movió el slider)
+    if (songTime >= this.lastSong && songTime - this.lastSong < 1.5) {
+      for (const cue of this.cues) {
+        if (cue.at > this.lastSong && cue.at <= songTime) this.trigger(cue.fx, cue.amp ?? 1, accent);
+      }
+    }
+    this.lastSong = songTime;
+
+    // Glitches aleatorios (más frecuentes cuando hay más energía)
+    this.next -= dt * (1 + a.energy * 1.5);
+    if (this.next <= 0) {
+      this.next = rand(...PARAMS.glitch.randomInterval);
+      this.trigger(this.pick(), rand(0.5, 1), accent);
+    }
+
+    const v = this.v;
+    v.rgb = 0.0007 + a.bass * 0.0012;
+    v.slice = 0; v.warp = 0; v.flash = 0; v.pixel = 0; v.invert = 0;
+    v.noise = 0.02; v.shake = 0; v.fov = 0; v.roll = 0; v.video = 0;
+
+    for (let i = this.fx.length - 1; i >= 0; i--) {
+      const f = this.fx[i];
+      f.t += dt;
+      const p = f.t / f.dur;
+      if (p >= 1) { this.fx.splice(i, 1); continue; }
+      const e = (1 - p) * (1 - p) * f.amp;
+      switch (f.type) {
+        case 'rgb': v.rgb += 0.014 * e; v.video = Math.max(v.video, e); break;
+        case 'signal': v.slice += e; v.rgb += 0.008 * e; v.noise += 0.14 * e; v.video = Math.max(v.video, e); break;
+        case 'warp': v.warp += e * 0.9; v.fov += 16 * e; v.rgb += 0.006 * e; v.roll += Math.sin(f.t * 30) * 0.02 * e; break;
+        case 'flash':
+          if (e > v.flash) { v.flash = Math.min(1, e * 0.9); if (f.color) v.flashColor.copy(f.color); }
+          break;
+        case 'pixel': v.pixel = Math.max(v.pixel, 10 + 10 * f.amp); v.video = Math.max(v.video, 0.6); break;
+        case 'invert': v.invert = Math.floor(f.t * 45) % 2 === 0 ? 1 : 0; break;
+        case 'shake': v.shake += 0.4 * e; break;
+        case 'zoom': v.fov -= 12 * e; break;
+        default: break;
+      }
+    }
+  }
+}
+
+// =====================================================================
+//  API pública
+// =====================================================================
+export function createSimulation(canvas) {
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
+  renderer.setClearColor(0x000000, 1);
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x000000);
+  scene.fog = new THREE.FogExp2(0x000000, 0.02);
+
+  const camera = new THREE.PerspectiveCamera(PARAMS.camera.fovDesktop, 1, PARAMS.camera.near, PARAMS.camera.far);
+
+  // Rig de luces compartido (evita recompilar shaders al cambiar de escena)
+  const rig = {
+    hemi: new THREE.HemisphereLight(0xffffff, 0x111122, 0.4),
+    key: new THREE.PointLight(0xffffff, 100, 0, 2),
+    fill: new THREE.PointLight(0xffffff, 100, 0, 2),
+    dir: new THREE.DirectionalLight(0xffffff, 0),
+  };
+  rig.dir.position.set(3, 8, 5);
+  rig.key.position.set(4, 4, 6);
+  rig.fill.position.set(-4, 2, 5);
+  scene.add(rig.hemi, rig.key, rig.fill, rig.dir);
+
+  const scenes = [new ClubScene(), new MatrixScene(), new CityScene(), new DataScene()];
+  scenes.forEach((s) => scene.add(s.group));
+
+  const post = createPost(renderer);
+  const glitch = new GlitchDirector();
+
+  const sim = {
+    target: 0,
+    baseFov: PARAMS.camera.fovDesktop,
+    distScale: 1,
+    motionTime: 0,
+    motionSpeed: 1,
+    scenes,
+    glitch,
+  };
+
+  const camPos = new THREE.Vector3();
+  const camLook = new THREE.Vector3();
+  const tmpV = new THREE.Vector3();
+  const bg = new THREE.Color();
+
+  sim.resize = (w, h) => {
+    const maxPR = MOBILE ? PARAMS.camera.maxPixelRatioMobile : PARAMS.camera.maxPixelRatioDesktop;
+    const pr = Math.min(window.devicePixelRatio || 1, maxPR);
+    SHARED.px.value = pr;
+    renderer.setPixelRatio(pr);
+    renderer.setSize(w, h, false);
+    post.setSize(Math.floor(w * pr), Math.floor(h * pr));
+    camera.aspect = w / h;
+    const portrait = camera.aspect < 1;
+    sim.baseFov = portrait ? PARAMS.camera.fovPortrait : PARAMS.camera.fovDesktop;
+    sim.distScale = portrait ? PARAMS.camera.portraitDistanceScale : 1;
+    camera.fov = sim.baseFov;
+    camera.updateProjectionMatrix();
+  };
+
+  // Cambia de escena con fundido (también funciona al mover el slider)
+  sim.setScene = (idx, instant = false) => {
+    if (idx === sim.target && !instant) return;
+    const changed = idx !== sim.target;
+    sim.target = idx;
+    if (instant) {
+      scenes.forEach((s, i) => {
+        s.setOpacity(i === idx ? 1 : 0);
+        if (i === idx && !s.playing) { s.playing = true; s.enter(); }
+        if (i !== idx && s.playing) { s.playing = false; s.leave(); }
+      });
+    } else if (changed) {
+      glitch.onTransition(scenes[idx].pickAccent());
+    }
+  };
+
+  // Reintenta reproducir los videos activos tras el primer gesto del usuario
+  sim.kick = () => {
+    scenes.forEach((s) => { if (s.playing) s.enter(); });
+  };
+
+  sim.triggerGlitch = (type, amp = 1) => glitch.trigger(type, amp, scenes[sim.target].pickAccent());
+
+  sim.update = (dt, t, a, songTime) => {
+    const step = dt / PARAMS.scenes.crossfade;
+    const active = scenes[sim.target];
+    const motionTarget = clamp(
+      0.82 + Math.min(a.energy, 1.5) * 0.25 + a.beatEnv * 0.22 + (a.drop ? 0.2 : 0),
+      0.82,
+      1.48
+    );
+    sim.motionSpeed += (motionTarget - sim.motionSpeed) * (1 - Math.exp(-dt * 0.9));
+    sim.motionTime += dt * sim.motionSpeed;
+
+    // Opacidades (fundido independiente por escena: robusto al mover el slider)
+    scenes.forEach((s, i) => {
+      const goal = i === sim.target ? 1 : 0;
+      let o = s.opacity;
+      if (o < goal) o = Math.min(goal, o + step);
+      else if (o > goal) o = Math.max(goal, o - step);
+      s.setOpacity(o);
+      if (o > 0 && !s.playing) { s.playing = true; s.enter(); }
+      if (o === 0 && s.playing) { s.playing = false; s.leave(); }
+    });
+
+    // Eventos de audio
+    const accent = active.pickAccent();
+    if (a.beat) { active.onBeat(a.beatStrength); glitch.onBeat(a.beatStrength, accent); }
+    if (a.drop) { active.onDrop(a.dropStrength); glitch.onDrop(accent); }
+    if (a.peak) active.onPeak();
+
+    glitch.update(dt, a, songTime, accent);
+
+    // Actualizar escenas visibles
+    const ctx = {
+      t,
+      mt: sim.motionTime,
+      dt,
+      a,
+      glitch: glitch.v.video,
+      motionSpeed: sim.motionSpeed,
+    };
+    scenes.forEach((s) => { if (s.opacity > 0) s.update(ctx); });
+
+    // Mezcla de cámara / fondo / niebla entre escenas
+    camPos.set(0, 0, 0);
+    camLook.set(0, 0, 0);
+    bg.setRGB(0, 0, 0);
+    let fog = 0;
+    let sum = 0;
+    scenes.forEach((s) => {
+      const w = smooth(s.opacity);
+      if (w <= 0) return;
+      camPos.addScaledVector(s.cam.pos, w);
+      camLook.addScaledVector(s.cam.look, w);
+      bg.r += s.bg.r * w; bg.g += s.bg.g * w; bg.b += s.bg.b * w;
+      fog += s.fogDensity * w;
+      sum += w;
+    });
+    if (sum > 0) {
+      camPos.multiplyScalar(1 / sum);
+      camLook.multiplyScalar(1 / sum);
+      bg.r /= sum; bg.g /= sum; bg.b /= sum;
+      fog /= sum;
+    }
+    scene.background.copy(bg);
+    scene.fog.color.copy(bg);
+    scene.fog.density = fog;
+
+    // Luces según la escena dominante
+    active.lights(rig, sim.motionTime, a, 1 - Math.exp(-dt * 3));
+
+    // Cámara: escala de distancia (móvil vertical), sacudida, golpes de FOV y giro
+    tmpV.copy(camPos).sub(camLook).multiplyScalar(sim.distScale);
+    camera.position.copy(camLook).add(tmpV);
+    const sh = glitch.v.shake;
+    if (sh > 0) {
+      camera.position.x += (Math.random() - 0.5) * sh;
+      camera.position.y += (Math.random() - 0.5) * sh;
+    }
+    camera.lookAt(camLook);
+    if (glitch.v.roll) camera.rotateZ(glitch.v.roll);
+    camera.fov = sim.baseFov + glitch.v.fov + a.bass * 1.5;
+    camera.updateProjectionMatrix();
+    scenes.forEach((s) => s.video?.fitToCamera(camera, camLook, s.group));
+    scenes.forEach((s) => s.fitHudToCamera?.(camera, camLook));
+  };
+
+  sim.render = (t) => post.render(renderer, scene, camera, glitch.v, t);
+
+  return sim;
 }

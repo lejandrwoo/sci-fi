@@ -1,147 +1,148 @@
-// ============================================================
-//  parameters.js
-//  Todo lo "ajustable" del proyecto vive aquí: valores por
-//  defecto, definición de los sliders del panel y presets.
-//  Si quieres cambiar el look, empieza por este archivo.
-// ============================================================
+// =====================================================================
+//  parameters.js — Todo lo ajustable del visualizador vive aquí.
+// =====================================================================
 
-// La canción está en /public/la cancion.mp3 → Vite la sirve en la raíz.
-// El espacio del nombre se codifica como %20.
-const BASE = import.meta.env?.BASE_URL ?? '/';
-export const AUDIO_SRC = `${BASE}la%20cancion.mp3`;
-export const AUDIO_NAME = 'la cancion.mp3';
-
-// Configuración "fija" (no aparece en el panel)
-export const config = {
-  fftSize: 2048,          // resolución del análisis de audio
-  bandsCount: 48,         // barras del ecualizador
-  bands: {                // rangos de frecuencia (Hz)
-    bass: [20, 150],
-    mid: [150, 2000],
-    treble: [2000, 9000],
+export const PARAMS = {
+  // ---------- Archivos ----------
+  // Se prueban en orden hasta que uno responda:
+  //  '/'          -> Vite (la carpeta public/ se sirve en la raíz)
+  //  './public/'  -> servidor estático abierto en la raíz del proyecto
+  //  './'         -> archivos junto al index.html
+  assets: {
+    bases: ['/', './public/', './'],
+    audio: 'la%20cancion.mp3',
+    videos: ['anim1.mp4', 'anim2.mp4', 'anim3.mp4'],
+    dataVideo: 'DATA.mp4',
   },
-  baseHue: 135,           // tono HSL del verde matriz
-  glyphs:
-    'ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ0123456789<>/\\|=+*:;',
-  storageKey: 'sci-fi-matrix-city-v1',
-};
 
-// Valores iniciales de todos los parámetros
-export const defaultParams = {
-  // --- Audio ---
-  volume: 0.85,
-  sensitivity: 1.0,
-  smoothing: 0.6,
-  beatThreshold: 1.3,
-  idleMotion: true,       // animación suave cuando no suena la canción
-
-  // --- Ciudad cifrada ---
-  showCity: true,
-  buildingDensity: 1.0,
-  buildingHeight: 1.0,
-  glyphSize: 11,
-  citySpeed: 0.25,
-  buildingPulse: 0.6,
-
-  // --- Lluvia matrix ---
-  showRain: true,
-  rainDensity: 0.75,
-  rainSpeed: 1.0,
-  rainTrail: 16,
-
-  // --- Láseres de discoteca ---
-  showLasers: true,
-  autoPattern: true,      // cambia de coreografía cada 8 beats
-  laserCount: 8,
-  laserWidth: 1.0,
-  laserSweep: 0.8,
-  laserSpeed: 1.0,
-  laserFog: 0.4,
-
-  // --- Retro ---
-  showSun: true,
-  showGrid: true,
-  showBars: true,
-  horizon: 0.64,
-  gridSpeed: 1.0,
-  gridGlow: 0.9,
-
-  // --- Postproceso ---
-  bloom: 0.8,
-  scanlines: 0.4,
-  glitch: 0.5,
-  shake: 0.4,
-  hue: 0,
-};
-
-// Estos parámetros obligan a regenerar los edificios al cambiar
-export const regenKeys = ['buildingDensity', 'buildingHeight', 'glyphSize'];
-
-// Definición de controles para el panel (labPanel.js)
-export const paramDefinitions = [
-  // Audio
-  { group: 'Audio', key: 'volume', label: 'Volumen', min: 0, max: 1, step: 0.01 },
-  { group: 'Audio', key: 'sensitivity', label: 'Sensibilidad', min: 0.4, max: 2.5, step: 0.05 },
-  { group: 'Audio', key: 'smoothing', label: 'Suavizado', min: 0.2, max: 0.95, step: 0.01 },
-  { group: 'Audio', key: 'beatThreshold', label: 'Umbral de beat', min: 1.1, max: 2, step: 0.01 },
-  { group: 'Audio', key: 'idleMotion', label: 'Movimiento en reposo', type: 'toggle' },
-
-  // Ciudad
-  { group: 'Ciudad', key: 'showCity', label: 'Mostrar edificios', type: 'toggle' },
-  { group: 'Ciudad', key: 'buildingDensity', label: 'Densidad', min: 0.5, max: 1.8, step: 0.05 },
-  { group: 'Ciudad', key: 'buildingHeight', label: 'Altura', min: 0.5, max: 1.5, step: 0.05 },
-  { group: 'Ciudad', key: 'glyphSize', label: 'Tamaño de glifo', min: 8, max: 20, step: 1 },
-  { group: 'Ciudad', key: 'citySpeed', label: 'Velocidad de cámara', min: 0, max: 1.5, step: 0.01 },
-  { group: 'Ciudad', key: 'buildingPulse', label: 'Pulso con el bajo', min: 0, max: 1.5, step: 0.01 },
-
-  // Lluvia
-  { group: 'Lluvia', key: 'showRain', label: 'Mostrar lluvia', type: 'toggle' },
-  { group: 'Lluvia', key: 'rainDensity', label: 'Densidad', min: 0, max: 1, step: 0.01 },
-  { group: 'Lluvia', key: 'rainSpeed', label: 'Velocidad', min: 0.3, max: 3, step: 0.05 },
-  { group: 'Lluvia', key: 'rainTrail', label: 'Largo de estela', min: 6, max: 30, step: 1 },
-
-  // Láseres
-  { group: 'Láseres', key: 'showLasers', label: 'Mostrar láseres', type: 'toggle' },
-  { group: 'Láseres', key: 'autoPattern', label: 'Cambio auto de patrón', type: 'toggle' },
-  { group: 'Láseres', key: 'laserCount', label: 'Cantidad', min: 2, max: 12, step: 1 },
-  { group: 'Láseres', key: 'laserWidth', label: 'Grosor', min: 0.3, max: 3, step: 0.05 },
-  { group: 'Láseres', key: 'laserSweep', label: 'Barrido', min: 0.2, max: 1.4, step: 0.01 },
-  { group: 'Láseres', key: 'laserSpeed', label: 'Velocidad', min: 0.2, max: 3, step: 0.05 },
-  { group: 'Láseres', key: 'laserFog', label: 'Niebla de luz', min: 0, max: 1, step: 0.01 },
-
-  // Retro
-  { group: 'Retro', key: 'showSun', label: 'Sol retro', type: 'toggle' },
-  { group: 'Retro', key: 'showGrid', label: 'Grilla del piso', type: 'toggle' },
-  { group: 'Retro', key: 'showBars', label: 'Ecualizador LED', type: 'toggle' },
-  { group: 'Retro', key: 'horizon', label: 'Horizonte', min: 0.5, max: 0.8, step: 0.01 },
-  { group: 'Retro', key: 'gridSpeed', label: 'Velocidad de grilla', min: 0, max: 3, step: 0.05 },
-  { group: 'Retro', key: 'gridGlow', label: 'Brillo de grilla', min: 0, max: 1.5, step: 0.01 },
-
-  // Postproceso
-  { group: 'Postproceso', key: 'bloom', label: 'Bloom', min: 0, max: 1.5, step: 0.01 },
-  { group: 'Postproceso', key: 'scanlines', label: 'Scanlines CRT', min: 0, max: 1, step: 0.01 },
-  { group: 'Postproceso', key: 'glitch', label: 'Glitch en beat', min: 0, max: 1, step: 0.01 },
-  { group: 'Postproceso', key: 'shake', label: 'Temblor de cámara', min: 0, max: 1, step: 0.01 },
-  { group: 'Postproceso', key: 'hue', label: 'Giro de color (°)', min: -60, max: 90, step: 1 },
-];
-
-// Presets: se aplican sobre los valores por defecto
-export const presets = {
-  'Matrix clásico': {
-    rainDensity: 1, rainSpeed: 1.2, rainTrail: 22, laserCount: 4, laserFog: 0.2,
-    showSun: false, glitch: 0.3, bloom: 0.7,
+  // ---------- Chroma key de fondo negro ----------
+  // Se compara el canal más brillante (max(r,g,b)) de cada píxel:
+  //  luma <= threshold              -> alfa 0 (transparente)
+  //  threshold < luma < +softness   -> degradado suave (borde sin "halo" negro)
+  //  luma >= threshold + softness   -> opaco
+  // Sube threshold si ves un recuadro gris; bájalo si se comen los tonos oscuros.
+  chroma: {
+    threshold: 0.10,
+    softness: 0.08,
   },
-  'Discoteca': {
-    laserCount: 12, laserSweep: 1.1, laserSpeed: 1.6, laserFog: 0.75, laserWidth: 1.3,
-    bloom: 1.1, glitch: 0.7, hue: 18, rainDensity: 0.5, shake: 0.6,
+
+  // Altura (en unidades 3D) del plano que muestra cada video
+  video: { height: 5.4, featuredHeight: 6.1 },
+
+  // ---------- Colores ----------
+  colors: {
+    club: {
+      bg: 0x05020a,
+      green: 0x39ff14,
+      orange: 0xff7a00,
+      palettes: [
+        { green: 0x39ff14, orange: 0xff7a00 },
+        { green: 0x00e5ff, orange: 0xff38b8 },
+        { green: 0x9b5cff, orange: 0xffcf4a },
+        { green: 0x45ffb0, orange: 0xff5068 },
+      ],
+    },
+    matrix: { bg: 0x06070a, white: 0xffffff, ice: 0xdfe9ff },
+    city: {
+      bg: 0x020b05,
+      skyTop: 0x010905,
+      skyMid: 0x073b1b,
+      skyHorizon: 0x20b45a,
+      neonA: 0x39ff14,
+      neonB: 0x00d878,
+      amber: 0xa6ff70,
+      building: 0x071b10,
+      grid: 0x22ff66,
+      star: 0x9cffb0,
+      comets: [0x9cffb0, 0x39ff14, 0x00d878],
+    },
   },
-  'Ciber-calma': {
-    citySpeed: 0.1, laserCount: 4, laserSpeed: 0.5, laserFog: 0.25, bloom: 0.6,
-    rainDensity: 0.5, rainSpeed: 0.7, glitch: 0.15, shake: 0.1, gridSpeed: 0.6,
+
+  // ---------- Audio ----------
+  audio: {
+    fftSize: 2048,
+    smoothing: 0.75,
+    loop: true,
+    bands: { bass: [30, 150], mid: [150, 2000], high: [2500, 12000] }, // Hz
+    agcFloor: 0.25,            // piso de la normalización automática de nivel
+    beat: { ratio: 1.3, min: 0.35, cooldown: 0.22 },
+    // "Drop": la energía rápida supera a la lenta por este margen
+    drop: { threshold: 0.22, minBass: 0.6, cooldown: 2.0, warmup: 3.0 },
+    // "Pico" de agudos (dispara cometas)
+    peak: { threshold: 0.22, cooldown: 0.35 },
   },
-  'Overdrive': {
-    laserCount: 12, laserSweep: 1.3, laserSpeed: 2.2, laserFog: 0.9, laserWidth: 1.6,
-    rainDensity: 1, rainSpeed: 2, bloom: 1.4, glitch: 1, shake: 1,
-    citySpeed: 0.6, gridSpeed: 2.2, buildingPulse: 1.2, sensitivity: 1.4,
+
+  // ---------- Secuencia de escenas ----------
+  // start = fracción (0..1) de la duración total de la canción.
+  // scene: 0 = discoteca (anim1), 1 = edificios blancos (anim2), 2 = ciudad/cielo (anim3), 3 = DATA
+  // Ajusta estas fracciones cuando conozcas los momentos exactos de la canción.
+  scenes: {
+    crossfade: 2.6,        // segundos de fundido entre escenas
+    fallbackDuration: 200, // segundos, solo si el navegador aún no conoce la duración
+    timeline: [
+      { start: 0.00, scene: 0 },
+      { start: 0.19, scene: 1 },
+      { start: 0.37, scene: 2 },
+      { start: 0.56, scene: 3 },
+      { start: 0.73, scene: 0 },
+      { start: 0.87, scene: 2 },
+    ],
+  },
+
+  // ---------- Glitches / destellos / distorsiones ----------
+  glitch: {
+    randomInterval: [6.0, 13.0], // segundos entre glitches aleatorios (se acorta con la energía)
+    beatChance: 0.035,           // probabilidad de micro-glitch en cada beat fuerte
+    // Pesos de los efectos aleatorios:
+    //  signal = señal interferida · warp = salto hiperespacial · flash = destello
+    //  pixel = datos corruptos · invert = parpadeo negativo · rgb = aberración cromática
+    //  shake = sacudida de cámara · zoom = golpe de zoom
+    weights: { signal: 3, warp: 2, flash: 2, pixel: 1.5, invert: 0.6, rgb: 3, shake: 1.5, zoom: 1.5 },
+    // Efectos fijos en un segundo exacto de la canción (para acompañar la letra):
+    // { at: 42.5, fx: 'warp', amp: 1 }
+    cues: [],
+  },
+
+  // ---------- Cámara / render ----------
+  camera: {
+    fovDesktop: 55,
+    fovPortrait: 78,           // celulares en vertical
+    portraitDistanceScale: 1.25,
+    near: 0.1,
+    far: 1200,
+    maxPixelRatioDesktop: 2,
+    maxPixelRatioMobile: 1.5,
+  },
+
+  // Factor de partículas/edificios en pantallas táctiles o pequeñas
+  quality: { mobileFactor: 0.5 },
+
+  ui: {
+    showStartHint: true, // el navegador exige un gesto para iniciar audio; ponlo en false para quitar el texto
+    hintText: 'toca la pantalla o pulsa una tecla para iniciar',
   },
 };
+
+// Estado compartido
+export const state = {
+  started: false,
+  presentation: false,
+};
+
+// Carga un <audio>/<video> probando cada base de PARAMS.assets.bases
+export function attachSourceFallback(el, file, onFail) {
+  const urls = PARAMS.assets.bases.map((b) => b + file);
+  let i = 0;
+  const next = () => {
+    if (i >= urls.length) {
+      el.removeEventListener('error', next);
+      if (onFail) onFail();
+      return;
+    }
+    el.src = urls[i++];
+    el.load();
+  };
+  el.addEventListener('error', next);
+  el.addEventListener('loadeddata', () => el.removeEventListener('error', next), { once: true });
+  next();
+}
