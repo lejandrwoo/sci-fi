@@ -527,6 +527,7 @@ class ClubScene extends BaseScene {
     }));
     this.green = this.palettes[0].green.clone();
     this.orange = this.palettes[0].orange.clone();
+    this.variantIndex = 0;
     this.accentColors = [this.green, this.orange];
     this.flip = false;
     this.boost = 0;
@@ -665,6 +666,17 @@ class ClubScene extends BaseScene {
     this.rings = new RingPool(this, FLOOR_Y + 0.02);
   }
 
+  randomizeVariant() {
+    let index = this.variantIndex;
+    while (this.palettes.length > 1 && index === this.variantIndex) {
+      index = randInt(0, this.palettes.length - 1);
+    }
+    this.variantIndex = index;
+    const palette = this.palettes[index];
+    this.green.copy(palette.green);
+    this.orange.copy(palette.orange);
+  }
+
   onBeat(s) {
     this.flip = !this.flip;
     this.rings.spawn(s, this.flip ? this.green : this.orange);
@@ -691,16 +703,6 @@ class ClubScene extends BaseScene {
     const { t, mt, dt, a, motionSpeed } = c;
     this.boost *= Math.exp(-dt * 2.5);
 
-    const cycleDuration = 14;
-    const transitionDuration = 2.5;
-    const cycle = Math.floor(t / cycleDuration);
-    const paletteIndex = cycle % this.palettes.length;
-    const previousIndex = (paletteIndex + this.palettes.length - 1) % this.palettes.length;
-    const blend = cycle === 0 ? 1 : smooth((t % cycleDuration) / transitionDuration);
-    const previous = this.palettes[previousIndex];
-    const target = this.palettes[paletteIndex];
-    this.green.copy(previous.green).lerp(target.green, blend);
-    this.orange.copy(previous.orange).lerp(target.orange, blend);
     this.video.material.uniforms.uTintGreen.value.copy(this.green);
     this.video.material.uniforms.uTintOrange.value.copy(this.orange);
 
@@ -1108,6 +1110,37 @@ class Comet {
 // =====================================================================
 //  ESCENA 3 — Ciudad retro sci-fi + cielo inmenso (anim3)
 // =====================================================================
+const CITY_VARIANTS = [
+  {
+    bg: 0x020b05, skyTop: 0x010905, skyMid: 0x073b1b, skyHorizon: 0x20b45a,
+    neonA: 0x39ff14, neonB: 0x00d878, amber: 0xa6ff70, building: 0x071b10,
+    grid: 0x22ff66, star: 0x9cffb0, sunTop: 0x59ff52, sunBottom: 0x007a36,
+    windows: ['#39ff14', '#00e676', '#a6ff00', '#00c853'],
+    comets: [0x9cffb0, 0x39ff14, 0x00d878], scale: [1, 1, 1], shift: 0,
+  },
+  {
+    bg: 0x080414, skyTop: 0x04020f, skyMid: 0x25104a, skyHorizon: 0xff4d9d,
+    neonA: 0xff4fd8, neonB: 0x41d9ff, amber: 0xffe37c, building: 0x100b22,
+    grid: 0xb657ff, star: 0xf5c5ff, sunTop: 0xff8acb, sunBottom: 0x7d1b72,
+    windows: ['#ff4fd8', '#41d9ff', '#ffe37c', '#9c55ff'],
+    comets: [0xffb4ed, 0x41d9ff, 0xff4fd8], scale: [0.9, 1.12, 0.88], shift: -7,
+  },
+  {
+    bg: 0x02131c, skyTop: 0x001016, skyMid: 0x064556, skyHorizon: 0x31f3df,
+    neonA: 0x00f0ff, neonB: 0x3b82f6, amber: 0xffce74, building: 0x06151e,
+    grid: 0x16d9d2, star: 0xb8ffff, sunTop: 0x71fff0, sunBottom: 0x08788b,
+    windows: ['#00f0ff', '#3b82f6', '#ffce74', '#45ffd2'],
+    comets: [0xb8ffff, 0x00f0ff, 0xffce74], scale: [1.12, 0.9, 1.05], shift: 8,
+  },
+  {
+    bg: 0x120704, skyTop: 0x10040a, skyMid: 0x4a190b, skyHorizon: 0xff7b36,
+    neonA: 0xff5b35, neonB: 0xffc247, amber: 0xffe4a3, building: 0x21100b,
+    grid: 0xff673a, star: 0xffd9a1, sunTop: 0xffe277, sunBottom: 0xb53523,
+    windows: ['#ff5b35', '#ffc247', '#ff9d4d', '#fff09a'],
+    comets: [0xffd9a1, 0xff673a, 0xfff09a], scale: [1.04, 1.08, 0.94], shift: -2,
+  },
+];
+
 class CityScene extends BaseScene {
   constructor() {
     super('city');
@@ -1118,6 +1151,8 @@ class CityScene extends BaseScene {
     this.neonA = new THREE.Color(C.neonA);
     this.neonB = new THREE.Color(C.neonB);
     this.accentColors = [this.neonA, this.neonB, new THREE.Color(C.amber)];
+    this.cometColors = C.comets;
+    this.variantIndex = 0;
     this.spawnQueue = [];
     this.idle = rand(2, 4);
     this.nodeBoost = 0;
@@ -1152,7 +1187,7 @@ class CityScene extends BaseScene {
           col = mix(col, uTop, smoothstep(0.2, 0.9, h));
           col += uHor * exp(-abs(vDir.y) * 6.0) * (0.25 + uBass * 0.6);
           float n = sin(vDir.x * 6.0 + uTime * 0.05) * sin(vDir.z * 5.0 - uTime * 0.04) * sin(vDir.y * 9.0);
-          col += vec3(0.06, 0.42, 0.12) * max(n, 0.0) * 0.35 * smoothstep(0.05, 0.5, h);
+          col += uMid * max(n, 0.0) * 0.35 * smoothstep(0.05, 0.5, h);
           gl_FragColor = vec4(col, uOpacity);
         }
       `,
@@ -1172,6 +1207,8 @@ class CityScene extends BaseScene {
     const ns = N(2600);
     const stars = createGlowPoints(ns, { twinkle: 0.6 });
     this.starMat = stars.material;
+    this.starColorAttribute = stars.geometry.attributes.aColor;
+    this.starBrightness = new Float32Array(ns);
     {
       const P = stars.geometry.attributes.position.array;
       const Cc = stars.geometry.attributes.aColor.array;
@@ -1184,6 +1221,7 @@ class CityScene extends BaseScene {
         v.normalize().multiplyScalar(250);
         P[i * 3] = v.x; P[i * 3 + 1] = v.y; P[i * 3 + 2] = v.z;
         const b = rand(0.5, 1);
+        this.starBrightness[i] = b;
         Cc[i * 3] = starColor.r * b; Cc[i * 3 + 1] = starColor.g * b; Cc[i * 3 + 2] = starColor.b * b;
         S[i] = Math.random() < 0.06 ? rand(5, 8) : rand(1.5, 3.5);
         Ph[i] = Math.random();
@@ -1202,19 +1240,22 @@ class CityScene extends BaseScene {
 
     // ---- Sol retro con franjas ----
     this.sunMat = new THREE.ShaderMaterial({
-      uniforms: { uOpacity: { value: 1 }, uTime: { value: 0 }, uBass: { value: 0 } },
+      uniforms: {
+        uOpacity: { value: 1 }, uTime: { value: 0 }, uBass: { value: 0 },
+        uSunTop: { value: new THREE.Color(0x59ff52) },
+        uSunBottom: { value: new THREE.Color(0x007a36) },
+      },
       vertexShader: /* glsl */ `
         varying vec2 vUv;
         void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }
       `,
       fragmentShader: /* glsl */ `
         uniform float uOpacity; uniform float uTime; uniform float uBass;
+        uniform vec3 uSunTop; uniform vec3 uSunBottom;
         varying vec2 vUv;
         void main() {
           float y = vUv.y;
-          vec3 top = vec3(0.35, 1.0, 0.32);
-          vec3 bot = vec3(0.0, 0.35, 0.14);
-          vec3 col = mix(bot, top, y) * (0.9 + uBass * 0.6);
+          vec3 col = mix(uSunBottom, uSunTop, y) * (0.9 + uBass * 0.6);
           float stripe = step(0.5, fract(y * 14.0 - uTime * 0.15));
           float cut = smoothstep(0.55, 0.35, y);
           float a = mix(1.0, stripe, cut);
@@ -1274,6 +1315,54 @@ class CityScene extends BaseScene {
 
     // ---- Ciudad retro sci-fi (edificios agrupados por altura) ----
     this.buildCity();
+  }
+
+  randomizeVariant() {
+    let index = this.variantIndex;
+    while (CITY_VARIANTS.length > 1 && index === this.variantIndex) {
+      index = randInt(0, CITY_VARIANTS.length - 1);
+    }
+    this.variantIndex = index;
+    const variant = CITY_VARIANTS[index];
+    this.bg.set(variant.bg);
+    this.neonA.set(variant.neonA);
+    this.neonB.set(variant.neonB);
+    this.accentColors[2].set(variant.amber);
+    this.cometColors = variant.comets;
+
+    this.skyMat.uniforms.uTop.value.set(variant.skyTop);
+    this.skyMat.uniforms.uMid.value.set(variant.skyMid);
+    this.skyMat.uniforms.uHor.value.set(variant.skyHorizon);
+    this.gridMat.uniforms.uColor.value.set(variant.grid);
+    this.gridMat.uniforms.uColor2.value.copy(this.neonA);
+    this.sunMat.uniforms.uSunTop.value.set(variant.sunTop);
+    this.sunMat.uniforms.uSunBottom.value.set(variant.sunBottom);
+    this.cityTex.dispose();
+    this.cityTex = makeNeonWindowsTexture(variant.windows);
+    this.cityMat.emissiveMap = this.cityTex;
+    this.cityMat.color.set(variant.building);
+    this.cityMat.needsUpdate = true;
+    this.cityBuildingGroup.scale.set(...variant.scale);
+    this.cityBuildingGroup.position.set(variant.shift, FLOOR_Y * (1 - variant.scale[1]), 0);
+
+    const starColor = new THREE.Color(variant.star);
+    const starColors = this.starColorAttribute.array;
+    for (let i = 0; i < this.starBrightness.length; i++) {
+      const b = this.starBrightness[i];
+      starColors[i * 3] = starColor.r * b;
+      starColors[i * 3 + 1] = starColor.g * b;
+      starColors[i * 3 + 2] = starColor.b * b;
+    }
+    this.starColorAttribute.needsUpdate = true;
+    this.constMat.color.copy(this.neonA);
+    const nodeColors = this.nodeGeo.attributes.aColor.array;
+    const nodeCount = nodeColors.length / 3;
+    for (let i = 0; i < nodeCount; i++) {
+      nodeColors[i * 3] = this.neonA.r;
+      nodeColors[i * 3 + 1] = this.neonA.g;
+      nodeColors[i * 3 + 2] = this.neonA.b;
+    }
+    this.nodeGeo.attributes.aColor.needsUpdate = true;
   }
 
   buildConstellations() {
@@ -1342,6 +1431,7 @@ class CityScene extends BaseScene {
 
   buildCity() {
     const C = this.C;
+    this.cityBuildingGroup = new THREE.Group();
     const palette = ['#39ff14', '#00e676', '#a6ff00', '#00c853'];
     this.cityTex = makeNeonWindowsTexture(palette);
     this.cityMat = new THREE.MeshStandardMaterial({
@@ -1386,9 +1476,10 @@ class CityScene extends BaseScene {
       mesh.instanceColor.needsUpdate = true;
       mesh.frustumCulled = false;
       mesh.renderOrder = -1;
-      this.group.add(mesh);
+      this.cityBuildingGroup.add(mesh);
       this.cityMeshes.push(mesh);
     }
+    this.group.add(this.cityBuildingGroup);
   }
 
   spawnComets(count, power = 1) {
@@ -1397,7 +1488,7 @@ class CityScene extends BaseScene {
   spawnOne(power) {
     const c = this.comets.find((x) => !x.active);
     if (!c) return;
-    const list = this.C.comets;
+    const list = this.cometColors;
     c.spawn(power, list[randInt(0, list.length - 1)]);
   }
 
@@ -1413,7 +1504,7 @@ class CityScene extends BaseScene {
   lights(rig, t, a, k) {
     rig.key.color.lerp(this.neonB, k);
     rig.fill.color.lerp(this.neonA, k);
-    rig.hemi.color.lerp(new THREE.Color(0x38ff72), k);
+    rig.hemi.color.lerp(this.neonA, k);
     rig.key.position.set(-6, 3, 6);
     rig.fill.position.set(6, 2, 6);
     rig.key.intensity = 90 + a.bass * 200;
@@ -1734,6 +1825,7 @@ export function createSimulation(canvas) {
     if (idx === sim.target && !instant) return;
     const changed = idx !== sim.target;
     sim.target = idx;
+    if (changed) scenes[idx].randomizeVariant?.();
     if (instant) {
       scenes.forEach((s, i) => {
         s.setOpacity(i === idx ? 1 : 0);

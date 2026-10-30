@@ -46,6 +46,19 @@ npm run dev
 
 Abre la URL que imprime Vite.
 
+## Secuencia visual
+
+Al iniciar, un teclado mecánico retrofuturista escribe «DATA», «Tainy»,
+«Rauw Alejandro» y «Sci-Fi» siguiendo el ritmo de la canción. La intro recrea
+un CRT matricial con píxeles parpadeantes y desaparece en el segundo 24.
+Los visuales comienzan en el segundo 25 y alternan aleatoriamente cada 4,5 a
+7,5 segundos. Los subtítulos se distribuyen por bloques usando los tiempos
+indicados para estribillos, versos, pre-estribillos y outro. Dentro de cada
+bloque, el tiempo de cada línea se estima según su longitud y se calcula
+localmente.
+Haz clic sobre los visuales para pausar o reanudar la canción y pulsa espacio
+para ocultar o volver a mostrar los subtítulos.
+
 ## Build de producción
 
 ```bash

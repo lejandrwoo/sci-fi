@@ -13,6 +13,48 @@
   <body>
     <canvas id="stage"></canvas>
 
+    <section id="intro" class="intro" aria-live="polite" aria-label="Introducción de la experiencia">
+      <div class="intro-card">
+        <p class="intro-kicker">RAUW ALEJANDRO <span>×</span> TAINY</p>
+        <div class="intro-screen">
+          <p id="intro-label" class="intro-label">SISTEMA EN ESPERA</p>
+          <p id="intro-text" class="intro-text" aria-label="Texto escrito"></p>
+          <p id="intro-cursor" class="intro-cursor" aria-hidden="true">_</p>
+          <div id="loader" class="loader hidden">
+            <div class="loader-heading">
+              <span id="loader-label">CARGANDO VISUALES</span>
+              <span id="loader-time">00:00 / 00:25</span>
+            </div>
+            <div class="loader-track"><span id="loader-progress"></span></div>
+          </div>
+        </div>
+        <div id="keyboard" class="keyboard" aria-hidden="true">
+          <div class="key-row">
+            <span class="key" data-key="q">Q</span><span class="key" data-key="w">W</span>
+            <span class="key" data-key="e">E</span><span class="key" data-key="r">R</span>
+            <span class="key" data-key="t">T</span><span class="key" data-key="y">Y</span>
+            <span class="key" data-key="u">U</span><span class="key" data-key="i">I</span>
+            <span class="key" data-key="o">O</span><span class="key" data-key="p">P</span>
+          </div>
+          <div class="key-row">
+            <span class="key" data-key="a">A</span><span class="key" data-key="s">S</span>
+            <span class="key" data-key="d">D</span><span class="key" data-key="f">F</span>
+            <span class="key" data-key="g">G</span><span class="key" data-key="h">H</span>
+            <span class="key" data-key="j">J</span><span class="key" data-key="k">K</span>
+            <span class="key" data-key="l">L</span>
+          </div>
+          <div class="key-row">
+            <span class="key key-space" data-key=" ">SPACE</span>
+            <span class="key key-symbol" data-key="-">-</span>
+            <span class="key key-enter" data-key="enter">↵</span>
+          </div>
+        </div>
+        <p id="intro-prompt" class="intro-prompt">TOCA O PULSA UNA TECLA PARA INICIAR</p>
+      </div>
+    </section>
+
+    <div id="subtitle" class="subtitle" aria-live="polite" aria-atomic="true"></div>
+
     <!-- Audio sin controles visibles (la canción vive en public/) -->
     <audio id="song" preload="auto" crossorigin="anonymous"></audio>
 

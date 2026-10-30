@@ -36,6 +36,20 @@ export function createLabPanel({ canvas, audio, onStart }) {
   window.addEventListener('keydown', firstGesture, true);
   window.addEventListener('touchend', firstGesture, true);
 
+  canvas.addEventListener('click', async () => {
+    if (!state.started) return;
+    if (!audio.paused) {
+      audio.pause();
+      return;
+    }
+
+    try {
+      await audio.play();
+    } catch (err) {
+      console.warn('No se pudo reanudar el audio:', err);
+    }
+  });
+
   // ---------- Slider ----------
   seek.addEventListener('pointerdown', () => { dragging = true; });
   seek.addEventListener('change', () => { dragging = false; });

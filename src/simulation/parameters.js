@@ -78,15 +78,9 @@ export const PARAMS = {
   // Ajusta estas fracciones cuando conozcas los momentos exactos de la canción.
   scenes: {
     crossfade: 2.6,        // segundos de fundido entre escenas
-    fallbackDuration: 200, // segundos, solo si el navegador aún no conoce la duración
-    timeline: [
-      { start: 0.00, scene: 0 },
-      { start: 0.19, scene: 1 },
-      { start: 0.37, scene: 2 },
-      { start: 0.56, scene: 3 },
-      { start: 0.73, scene: 0 },
-      { start: 0.87, scene: 2 },
-    ],
+    visualStart: 25,      // segundos de canción antes de mostrar los visuales
+    introDismissAt: 24,    // la intro desaparece un segundo antes de los visuales
+    randomInterval: [4.5, 7.5], // tiempo entre cambios de escena
   },
 
   // ---------- Glitches / destellos / distorsiones ----------
@@ -118,7 +112,7 @@ export const PARAMS = {
   quality: { mobileFactor: 0.5 },
 
   ui: {
-    showStartHint: true, // el navegador exige un gesto para iniciar audio; ponlo en false para quitar el texto
+    showStartHint: false, // la pantalla de teclado ya muestra la instrucción para iniciar
     hintText: 'toca la pantalla o pulsa una tecla para iniciar',
   },
 };
